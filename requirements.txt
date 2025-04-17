@@ -1,0 +1,10 @@
+pandas
+numpy
+scikit-learn
+pymysql
+SQLAlchemy
+ollama
+fsspec 
+huggingface_hub
+langdetect
+pythainlp
