@@ -48,27 +48,25 @@ df['cleaned_lyrics'] = lyrics_processed.apply(lambda x: x['cleaned_lyrics'])
 # 2.4 ทำความสะอาดชื่อเพลงและศิลปิน
 df['cleaned_track_name'] = df['track_name'].str.lower().str.strip()
 df['cleaned_artist'] = df['track_artist'].str.lower().str.strip()
+df['cleaned_album_name'] = df['track_album_name'].str.lower().str.strip()
 
 # 3. Feature Engineering
-# 3.1 สร้าง metadata ที่รวมข้อมูลสำคัญ
-df['metadata'] = (
-    "track: " + df['cleaned_track_name'] + 
-    " artist: " + df['cleaned_artist'] + 
-    " album: " + df['track_album_name'].str.lower() + 
-    " genre: " + df['playlist_genre'].str.lower() + 
-    " subgenre: " + df['playlist_subgenre'].str.lower()
-)
+# 3.1 เก็บข้อมูลแยกเป็นคอลัมน์แทนการรวมเป็น metadata
+# ข้อมูลอยู่แล้วในคอลัมน์ cleaned_track_name, cleaned_artist, cleaned_album_name
 
-# 3.2 ดึงคุณลักษณะทางดนตรี (เก็บเป็น feature vector)
-audio_features = [
-    'danceability', 'energy', 'key', 'loudness', 'mode', 
-    'speechiness', 'acousticness', 'instrumentalness', 
-    'liveness', 'valence', 'tempo'
-]
-
-# สเกลข้อมูลคุณลักษณะเสียงให้อยู่ในช่วงที่เหมาะสม
+# 3.2 สเกลข้อมูลคุณลักษณะเสียงแต่ละคอลัมน์แยกกัน
 scaler = StandardScaler()
-df[audio_features] = scaler.fit_transform(df[audio_features])
+df['danceability'] = scaler.fit_transform(df[['danceability']])
+df['energy'] = scaler.fit_transform(df[['energy']])
+df['key'] = scaler.fit_transform(df[['key']])
+df['loudness'] = scaler.fit_transform(df[['loudness']])
+df['mode'] = scaler.fit_transform(df[['mode']])
+df['speechiness'] = scaler.fit_transform(df[['speechiness']])
+df['acousticness'] = scaler.fit_transform(df[['acousticness']])
+df['instrumentalness'] = scaler.fit_transform(df[['instrumentalness']])
+df['liveness'] = scaler.fit_transform(df[['liveness']])
+df['valence'] = scaler.fit_transform(df[['valence']])
+df['tempo'] = scaler.fit_transform(df[['tempo']])
 
 # 3.3 แปลงข้อมูล categorical เป็น one-hot encoding
 categorical_features = ['playlist_genre', 'playlist_subgenre', 'language', 'sentiment']
@@ -109,18 +107,43 @@ for i in range(0, len(df), batch_size):
         embedding = get_ollama_embedding(truncated_text)
         lyrics_embeddings.append(embedding)
 
-# 4.4 สร้าง embeddings สำหรับ metadata
-metadata_embeddings = []
+# 4.4 สร้าง embeddings แยกสำหรับชื่อเพลง, ศิลปิน และอัลบั้ม
+track_name_embeddings = []
+artist_embeddings = []
+album_name_embeddings = []
+
+# สร้าง embeddings สำหรับชื่อเพลง
+print("Generating track name embeddings...")
 for i in range(0, len(df), batch_size):
-    print(f"Processing metadata batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
-    batch = df['metadata'][i:i+batch_size].tolist()
+    print(f"Processing track name batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
+    batch = df['cleaned_track_name'][i:i+batch_size].tolist()
     for text in batch:
         embedding = get_ollama_embedding(text)
-        metadata_embeddings.append(embedding)
+        track_name_embeddings.append(embedding)
+
+# สร้าง embeddings สำหรับชื่อศิลปิน
+print("Generating artist embeddings...")
+for i in range(0, len(df), batch_size):
+    print(f"Processing artist batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
+    batch = df['cleaned_artist'][i:i+batch_size].tolist()
+    for text in batch:
+        embedding = get_ollama_embedding(text)
+        artist_embeddings.append(embedding)
+
+# สร้าง embeddings สำหรับชื่ออัลบั้ม
+print("Generating album name embeddings...")
+for i in range(0, len(df), batch_size):
+    print(f"Processing album name batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
+    batch = df['cleaned_album_name'][i:i+batch_size].tolist()
+    for text in batch:
+        embedding = get_ollama_embedding(text)
+        album_name_embeddings.append(embedding)
 
 # 4.5 เก็บ embeddings ในแต่ละแถวของ DataFrame
 df['lyrics_embedding'] = lyrics_embeddings
-df['metadata_embedding'] = metadata_embeddings
+df['track_name_embedding'] = track_name_embeddings
+df['artist_embedding'] = artist_embeddings
+df['album_name_embedding'] = album_name_embeddings
 
 # 5. คำนวณคะแนนความเป็นที่นิยม (Normalized)
 df['popularity_score'] = df['track_popularity'] / 100.0
@@ -144,7 +167,7 @@ df['siamzone_id'] = None  # ตั้งค่าเริ่มต้นเป�
 song_records = []
 
 for idx, row in df.iterrows():
-    # สร้าง dictionary ที่มีค่า audio features แต่ละค่าแยกเป็นฟิลด์
+    # สร้าง dictionary ที่เก็บข้อมูลแต่ละฟิลด์แยกกัน
     song_record = {
         'song_id': row['song_id'],
         'track_name': row['track_name'],
@@ -152,8 +175,10 @@ for idx, row in df.iterrows():
         'track_album_name': row['track_album_name'],
         'original_lyrics': row['original_lyrics'],
         'lyrics': row['cleaned_lyrics'], 
-        'lyrics_embedding': row['lyrics_embedding'],  
-        'metadata_embedding': row['metadata_embedding'],
+        'lyrics_embedding': row['lyrics_embedding'],
+        'track_name_embedding': row['track_name_embedding'],
+        'artist_embedding': row['artist_embedding'],
+        'album_name_embedding': row['album_name_embedding'],
         'playlist_genre': row['playlist_genre'],
         'playlist_subgenre': row['playlist_subgenre'],
         'language': row['language'],
@@ -162,7 +187,7 @@ for idx, row in df.iterrows():
         'link': row['links'],
         'spotify_id': row['spotify_id'],
         'siamzone_id': row['siamzone_id'],
-        # เพิ่ม audio features แต่ละตัวแยกเป็นฟิลด์
+        # เก็บแต่ละ audio feature แยกกัน
         'danceability': float(row['danceability']),
         'energy': float(row['energy']),
         'key': float(row['key']),
@@ -184,10 +209,9 @@ with open('huggingface_processed_songs.json', 'w') as f:
 # 9. บันทึกเป็นไฟล์ CSV โดยเก็บแต่ละ audio feature เป็นคอลัมน์แยกกัน
 df_for_csv = df.copy()
 df_for_csv['lyrics_embedding'] = df_for_csv['lyrics_embedding'].apply(json.dumps)
-df_for_csv['metadata_embedding'] = df_for_csv['metadata_embedding'].apply(json.dumps)
-
-# ไม่จำเป็นต้องสร้าง audio_features_json อีกต่อไป เพราะเราเก็บแต่ละ feature เป็นคอลัมน์แยกแล้ว
-# df_for_csv['audio_features_json'] = df_for_csv[audio_features].apply(lambda row: json.dumps(row.tolist()), axis=1)
+df_for_csv['track_name_embedding'] = df_for_csv['track_name_embedding'].apply(json.dumps)
+df_for_csv['artist_embedding'] = df_for_csv['artist_embedding'].apply(json.dumps)
+df_for_csv['album_name_embedding'] = df_for_csv['album_name_embedding'].apply(json.dumps)
 
 # บันทึกเป็นไฟล์ CSV รวมตามชื่อที่ต้องการ (จะมีคอลัมน์แยกสำหรับแต่ละ audio feature)
 df_for_csv.to_csv('huggingface_processed_songs.csv', index=False)

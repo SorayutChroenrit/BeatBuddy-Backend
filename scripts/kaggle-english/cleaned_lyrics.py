@@ -42,11 +42,12 @@ lyrics_processed = df['lyrics'].apply(clean_lyrics)
 df['original_lyrics'] = lyrics_processed.apply(lambda x: x['original_lyrics'])
 df['cleaned_lyrics'] = lyrics_processed.apply(lambda x: x['cleaned_lyrics'])
 
-# 4. สร้างฟิลด์ metadata
-print("Creating metadata field...")
-df['metadata'] = "track: " + df['song'].str.lower() + " artist: " + df['artists'].str.lower()
+# ทำความสะอาดข้อมูลอื่นๆ
+df['cleaned_song'] = df['song'].str.lower().str.strip()
+df['cleaned_artists'] = df['artists'].str.lower().str.strip()
+df['cleaned_genres'] = df['genres'].str.lower().str.strip()
 
-# 5. สร้าง Embeddings ด้วย Ollama
+# 4. สร้าง Embeddings ด้วย Ollama
 print("Generating embeddings with Ollama (Llama 3.1 model)...")
 
 # ฟังก์ชันเพื่อรับ embeddings จาก Ollama
@@ -62,41 +63,44 @@ def get_ollama_embedding(text):
 # ประมวลผลเป็นกลุ่มเพื่อประหยัดหน่วยความจำ
 batch_size = 32
 
+# ฟังก์ชันสำหรับสร้าง embeddings สำหรับข้อมูลต่างๆ
+def generate_embeddings(data_series):
+    embeddings = []
+    for i in range(0, len(data_series), batch_size):
+        print(f"Processing batch {i//batch_size + 1}/{(len(data_series) + batch_size - 1)//batch_size}")
+        batch = data_series[i:i+batch_size].tolist()
+        for text in batch:
+            # ตัดข้อความให้สั้นลงเพื่อประสิทธิภาพ
+            truncated_text = str(text)[:1000]  # จำกัดที่ 1000 ตัวอักษร
+            embedding = get_ollama_embedding(truncated_text)
+            embeddings.append(embedding)
+    return embeddings
+
 # สร้าง embeddings สำหรับเนื้อเพลง
 print("Generating lyrics embeddings...")
-lyrics_embeddings = []
-for i in range(0, len(df), batch_size):
-    print(f"Processing lyrics batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
-    batch = df['cleaned_lyrics'][i:i+batch_size].tolist()
-    for text in batch:
-        # ตัดข้อความให้สั้นลงเพื่อประสิทธิภาพ
-        truncated_text = text[:1000]  # จำกัดที่ 1000 ตัวอักษร
-        embedding = get_ollama_embedding(truncated_text)
-        lyrics_embeddings.append(embedding)
+df['lyrics_embedding'] = generate_embeddings(df['cleaned_lyrics'])
 
-# สร้าง embeddings สำหรับ metadata
-print("Generating metadata embeddings...")
-metadata_embeddings = []
-for i in range(0, len(df), batch_size):
-    print(f"Processing metadata batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
-    batch = df['metadata'][i:i+batch_size].tolist()
-    for text in batch:
-        embedding = get_ollama_embedding(text)
-        metadata_embeddings.append(embedding)
+# สร้าง embeddings สำหรับ track name
+print("Generating track name embeddings...")
+df['track_name_embedding'] = generate_embeddings(df['cleaned_song'])
 
-# เพิ่ม embeddings ลงใน dataframe
-df['lyrics_embedding'] = lyrics_embeddings
-df['metadata_embedding'] = metadata_embeddings
+# สร้าง embeddings สำหรับ track artist
+print("Generating track artist embeddings...")
+df['track_artist_embedding'] = generate_embeddings(df['cleaned_artists'])
 
-# 6. จัดการ IDs
-# เก็บ song_id ดั้งเดิมเป็น spotify_id และเก็บ artist_id ไว้
+# สร้าง embeddings สำหรับ genres
+print("Generating genres embeddings...")
+df['genres_embedding'] = generate_embeddings(df['cleaned_genres'])
+
+# 5. จัดการ IDs
+# เก็บ song_id และ artist_id จากข้อมูลต้นฉบับ
 df['spotify_id'] = df['song_id']  # song_id ดั้งเดิมคือ Spotify ID
 df['original_artist_id'] = df['artist_id']
 
 # สร้าง UUIDs ใหม่สำหรับคีย์หลัก
 df['new_song_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
 
-# 7. เตรียมข้อมูลสำหรับ output JSON และ CSV
+# 6. เตรียมข้อมูลสำหรับ output JSON และ CSV
 print("Preparing final data records...")
 song_records = []
 
@@ -109,24 +113,30 @@ for idx, row in df.iterrows():
         'original_lyrics': row['original_lyrics'],
         'lyrics': row['cleaned_lyrics'],
         'lyrics_embedding': row['lyrics_embedding'],
-        'metadata_embedding': row['metadata_embedding'],
+        'track_name_embedding': row['track_name_embedding'],
+        'track_artist_embedding': row['track_artist_embedding'],
+        'genres_embedding': row['genres_embedding'],
         'spotify_id': row['spotify_id'],
         'original_artist_id': row['original_artist_id'],
         'genres': row['genres'],
-        'explicit': row['explicit']
+        'explicit': row['explicit'] if 'explicit' in df.columns else None
     }
     song_records.append(song_record)
 
-# 8. บันทึกข้อมูลที่ประมวลผลแล้วเป็น JSON ตามที่ต้องการ
+# 7. บันทึกข้อมูลที่ประมวลผลแล้วเป็น JSON ตามที่ต้องการ
 print("Saving to JSON...")
 with open('kaggle_processed_songs.json', 'w') as f:
     json.dump(song_records, f)
 
-# 9. บันทึกข้อมูลเป็นไฟล์ CSV รวม
+# 8. บันทึกข้อมูลเป็นไฟล์ CSV รวม
 print("Saving combined data to CSV...")
 df_for_csv = df.copy()
+
+# แปลง embeddings เป็น JSON string เพื่อบันทึกใน CSV
 df_for_csv['lyrics_embedding'] = df_for_csv['lyrics_embedding'].apply(json.dumps)
-df_for_csv['metadata_embedding'] = df_for_csv['metadata_embedding'].apply(json.dumps)
+df_for_csv['track_name_embedding'] = df_for_csv['track_name_embedding'].apply(json.dumps)
+df_for_csv['track_artist_embedding'] = df_for_csv['track_artist_embedding'].apply(json.dumps)
+df_for_csv['genres_embedding'] = df_for_csv['genres_embedding'].apply(json.dumps)
 
 # บันทึกเป็น CSV รวม
 df_for_csv.to_csv('kaggle_processed_songs.csv', index=False)

@@ -9,10 +9,16 @@ import time
 import random  
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
+from typing import List, Optional
+from pydantic import BaseModel
 import pythainlp
 from pythainlp.tokenize import word_tokenize
 from pythainlp.corpus import thai_stopwords
 from pythainlp.util import countthai
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, create_engine, text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -50,6 +56,119 @@ THAI_REQUEST_WORDS = [
 # Add Thai stopwords from PyThaiNLP
 THAI_STOPWORDS = list(thai_stopwords())
 THAI_STOPWORDS.extend(THAI_REQUEST_WORDS)
+
+
+# Define Base for SQLAlchemy models
+Base = declarative_base()
+
+# Define Chat History Model
+class ChatHistory(Base):
+    __tablename__ = "chat_history"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), index=True, nullable=False)
+    session_id = Column(String(255), index=True, nullable=False)
+    query = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    mode = Column(String(50), nullable=True)  # buddy, mentor, fun
+    intent = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "query": self.query,
+            "response": self.response,
+            "mode": self.mode,
+            "intent": self.intent,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+# Create tables if they don't exist
+def create_tables():
+    Base.metadata.create_all(engine)
+
+async def get_chat_history_by_user(user_id: str, limit: int = 50, offset: int = 0):
+    """Retrieve chat history for a specific user"""
+    try:
+        db = SessionLocal()
+        chats = db.query(ChatHistory).filter(
+            ChatHistory.user_id == user_id
+        ).order_by(
+            ChatHistory.created_at.desc()
+        ).offset(offset).limit(limit).all()
+        
+        result = [chat.to_dict() for chat in chats]
+        db.close()
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving chat history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve chat history: {str(e)}")
+
+async def get_chat_history_by_session(session_id: str, limit: int = 50, offset: int = 0):
+    """Retrieve chat history for a specific session"""
+    try:
+        db = SessionLocal()
+        chats = db.query(ChatHistory).filter(
+            ChatHistory.session_id == session_id
+        ).order_by(
+            ChatHistory.created_at.desc()
+        ).offset(offset).limit(limit).all()
+        
+        result = [chat.to_dict() for chat in chats]
+        db.close()
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving session chat history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve session chat history: {str(e)}")
+    
+create_tables()
+
+# Create session factory
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Add Pydantic models for API
+class ChatMessageCreate(BaseModel):
+    user_id: str
+    session_id: str
+    query: str
+    response: str
+    mode: Optional[str] = "buddy"
+    intent: Optional[str] = "general_query"
+
+class ChatMessageResponse(BaseModel):
+    id: int
+    user_id: str
+    session_id: str
+    query: str
+    response: str
+    mode: Optional[str] = None
+    intent: Optional[str] = None
+    created_at: str
+    
+async def save_chat_history(message: ChatMessageCreate):
+    try:
+        db = SessionLocal()
+        new_chat = ChatHistory(
+            user_id=message.user_id,
+            session_id=message.session_id,
+            query=message.query,
+            response=message.response,
+            mode=message.mode,
+            intent=message.intent
+        )
+        db.add(new_chat)
+        db.commit()
+        db.refresh(new_chat)
+        db.close()
+        return new_chat.to_dict()
+    except Exception as e:
+        logger.error(f"Error saving chat history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save chat history: {str(e)}")
+
+
 
 # For conversation tracking
 class ConversationContext:
@@ -1351,180 +1470,6 @@ async def hybrid_search(question, query_intent, query_embedding=None, top_k=5):
         logger.error(f"Error in hybrid search: {str(e)}")
         return []
 
-@app.post("/ask")
-async def ask_question(request: Request):
-    try:
-        # Get input data
-        start_time = time.time()
-        input_data = await request.json()
-        
-        if not input_data or "question" not in input_data:
-            raise HTTPException(status_code=400, detail="Invalid input format. Provide 'question' in request body.")
-
-        question = input_data.get("question", "").strip()
-        mode = input_data.get("mode", "buddy").lower()
-        session_id = input_data.get("session_id", "default")
-        
-        logger.info(f"=== NEW REQUEST === '{question}' in {mode} mode")
-        
-        # 1. Parse query intent using LLM
-        context = conversation_context.get_context(session_id)
-        intent_data = await parse_query_with_llm(question, context)
-        
-        # Update conversation context
-        conversation_context.update_context(session_id, {
-            'query': question,
-            'intent': intent_data.get('intent'),
-            'song_title': intent_data.get('song_title'),
-            'artist': intent_data.get('artist'),
-            'mood': intent_data.get('mood')
-        })
-        
-        # 2. Handle artist recommendations intent directly
-        if intent_data.get('intent') == 'artist_recommendations' and intent_data.get('artist'):
-            artist = intent_data.get('artist')
-            query_language = intent_data.get('detected_language', 'en')
-            
-            result = await handle_artist_recommendations(artist, mode, query_language, limit=5)
-            result["processing_time"] = round(time.time() - start_time, 2)
-            
-            return result
-        
-        # 3. Perform search based on intent
-        query_embedding = await get_query_embedding(question)
-        similar_results = await hybrid_search(question, intent_data, query_embedding)
-
-        # 4. Handle song analysis if requested
-        if intent_data.get('intent') == 'song_analysis' and similar_results:
-            song_data = similar_results[0]
-            query_language = intent_data.get('detected_language', 'en')
-            personality = PERSONALITY_MODES.get(mode, PERSONALITY_MODES["buddy"])  
-            
-            response_text = await generate_song_analysis(
-                song_data,
-                question,
-                personality,
-                query_language
-            )
-            
-            return {
-                "response": response_text,
-                "mode": mode,
-                "intent": "song_analysis",
-                "sources": [
-                    {
-                        "title": item["song_title"], 
-                        "artist": item["artist"], 
-                        "similarity": round(item["similarity"], 3),
-                        "match_type": item.get("match_type", "vector")
-                    } 
-                    for item in similar_results
-                ],
-                "processing_time": round(time.time() - start_time, 2)
-            }
-
-        # 5. Create context from results for LLM
-        context_items = []
-        sorted_results = sorted(similar_results, key=lambda x: x.get('similarity', 0), reverse=True)
-        
-        for item in sorted_results:
-            processed_text = item.get('processed_text', '').replace('\\n', '\n').replace('\\r', '\r')
-            
-            if item == sorted_results[0]:
-                context_items.append(
-                    f"BEST MATCH: Song: {item['song_title']} by {item['artist']}\n"
-                    f"(Match type: {item.get('match_type', 'unknown')})\n"
-                    f"Lyrics: {processed_text if processed_text.strip() else '[NO LYRICS FOUND IN DATABASE]'}"
-                )
-            else:
-                context_items.append(
-                    f"Song: {item['song_title']} by {item['artist']}\n"
-                    f"Lyrics: {processed_text if processed_text.strip() else '[NO LYRICS FOUND IN DATABASE]'}"
-                )
-        
-        context = "\n\n".join(context_items)
-        
-        # 6. Generate response with LLM
-        query_language = intent_data['detected_language']
-        personality = PERSONALITY_MODES.get(mode, PERSONALITY_MODES["buddy"])
-        
-        if similar_results:
-            # Check for ambiguous songs with same title by different artists
-            if 'song_title' in intent_data and intent_data['song_title'] and not intent_data.get('artist'):
-                if len(similar_results) > 1:
-                    artists_list = [f"{item['artist']}" for item in similar_results]
-                    artists_unique = list(set(artists_list))
-                    
-                    if len(artists_unique) > 1:
-                        if query_language == 'th':
-                            response_text = f"พบเพลง '{intent_data['song_title']}' จากหลายศิลปิน คุณต้องการเพลงของศิลปินคนไหน? ({', '.join(artists_unique[:5])})"
-                        else:
-                            response_text = f"I found the song '{intent_data['song_title']}' by multiple artists. Which artist's version would you like? ({', '.join(artists_unique[:5])})"
-                        
-                        conversation_context.update_context(session_id, {
-                            'ambiguous_song': intent_data['song_title']
-                        })
-                        
-                        return {
-                            "response": response_text,
-                            "mode": mode,
-                            "intent": "clarification",
-                            "sources": [{"title": item["song_title"], "artist": item["artist"]} for item in similar_results],
-                            "processing_time": round(time.time() - start_time, 2)
-                        }
-            
-            # Normal response generation
-            if query_language == 'th':
-                prompt = f"""
-                คำถามของผู้ใช้: "{question}"
-                
-                ข้อมูลเพลงที่ค้นพบในฐานข้อมูล:
-                {context}
-                
-                กรุณาตอบเป็นภาษาไทยในรูปแบบ {personality["response_format"]} ตามบุคลิกของคุณ
-                แสดงเฉพาะข้อมูลและเนื้อเพลงที่ระบุไว้ข้างต้นเท่านั้น
-                """
-            else:
-                prompt = f"""
-                User query: "{question}"
-                
-                Songs information found in database:
-                {context}
-                
-                Please respond in English in a {personality["response_format"]} style.
-                ONLY display information and lyrics shown above.
-                """
-            
-            response_text = await generate_llm_response(prompt, personality["system_prompt"])
-        else:
-            # No results found
-            if query_language == 'th':
-                response_text = "ขออภัย ไม่พบข้อมูลเพลงที่ตรงกับคำค้นหาของคุณในฐานข้อมูลของเรา"
-            else:
-                response_text = "Sorry, I couldn't find any songs matching your query in our database."
-                    
-        # 7. Return the response
-        return {
-            "response": response_text,
-            "mode": mode,
-            "intent": intent_data['intent'],
-            "sources": [
-                {
-                    "title": item["song_title"], 
-                    "artist": item["artist"], 
-                    "similarity": round(item["similarity"], 3),
-                    "match_type": item.get("match_type", "vector")
-                } 
-                for item in similar_results
-            ],
-            "processing_time": round(time.time() - start_time, 2)
-        }
-    
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-     
-
 
 async def parse_query_with_llm(question, context=None, max_retries=3):
     is_thai = countthai(question) / len(question) > 0.15 if question else False
@@ -1948,6 +1893,24 @@ async def search_by_audio_features(mood, top_k=5):
         logger.error(f"Error in audio feature search: {str(e)}")
         return []
 
+async def get_chat_history_by_user(user_id: str, limit: int = 50, offset: int = 0):
+    """Retrieve chat history for a specific user"""
+    try:
+        db = SessionLocal()
+        chats = db.query(ChatHistory).filter(
+            ChatHistory.user_id == user_id
+        ).order_by(
+            ChatHistory.created_at.desc()
+        ).offset(offset).limit(limit).all()
+        
+        result = [chat.to_dict() for chat in chats]
+        db.close()
+        return result
+    except Exception as e:
+        logger.error(f"Error retrieving chat history: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve chat history: {str(e)}")
+
+
 
 async def search_exact_song(song_title, artist=None):
     try:
@@ -2041,6 +2004,22 @@ async def search_exact_song(song_title, artist=None):
         return []
     
 
+@app.post("/save-chat", response_model=ChatMessageResponse)
+async def save_chat(message: ChatMessageCreate):
+    """Save a chat message to the database"""
+    return await save_chat_history(message)
+
+@app.get("/chat-history/session/{session_id}")
+async def get_session_chat_history(session_id: str, limit: int = 50, offset: int = 0):
+    """Get chat history for a specific session"""
+    return await get_chat_history_by_session(session_id, limit, offset)
+
+
+@app.get("/chat-history/{user_id}")
+async def get_user_chat_history(user_id: str, limit: int = 50, offset: int = 0):
+    """Get chat history for a specific user"""
+    return await get_chat_history_by_user(user_id, limit, offset)
+
 
 @app.post("/ask")
 async def ask_question(request: Request):
@@ -2055,8 +2034,9 @@ async def ask_question(request: Request):
         question = input_data.get("question", "").strip()
         mode = input_data.get("mode", "buddy").lower()
         session_id = input_data.get("session_id", "default")
+        user_id = input_data.get("user_id", "anonymous") 
         
-        logger.info(f"=== NEW REQUEST === '{question}' in {mode} mode")
+        logger.info(f"=== NEW REQUEST === '{question}' in {mode} mode from user {user_id}")
         
         # 1. Parse query intent using LLM
         context = conversation_context.get_context(session_id)
@@ -2079,6 +2059,18 @@ async def ask_question(request: Request):
             result = await handle_artist_recommendations(artist, mode, query_language, limit=5)
             result["processing_time"] = round(time.time() - start_time, 2)
             
+            # Save chat history for artist recommendations
+            if user_id != "anonymous":
+                chat_data = ChatMessageCreate(
+                    user_id=user_id,
+                    session_id=session_id,
+                    query=question,
+                    response=result["response"],
+                    mode=mode,
+                    intent=intent_data['intent']
+                )
+                await save_chat_history(chat_data)
+            
             return result
         
         # 3. Perform search based on intent
@@ -2097,6 +2089,18 @@ async def ask_question(request: Request):
                 personality,
                 query_language
             )
+            
+            # Save chat history for song analysis
+            if user_id != "anonymous":
+                chat_data = ChatMessageCreate(
+                    user_id=user_id,
+                    session_id=session_id,
+                    query=question,
+                    response=response_text,
+                    mode=mode,
+                    intent="song_analysis"
+                )
+                await save_chat_history(chat_data)
             
             return {
                 "response": response_text,
@@ -2156,6 +2160,18 @@ async def ask_question(request: Request):
                             'ambiguous_song': intent_data['song_title']
                         })
                         
+                        # Save chat history for clarification
+                        if user_id != "anonymous":
+                            chat_data = ChatMessageCreate(
+                                user_id=user_id,
+                                session_id=session_id,
+                                query=question,
+                                response=response_text,
+                                mode=mode,
+                                intent="clarification"
+                            )
+                            await save_chat_history(chat_data)
+                        
                         return {
                             "response": response_text,
                             "mode": mode,
@@ -2193,7 +2209,19 @@ async def ask_question(request: Request):
                 response_text = "ขออภัย ไม่พบข้อมูลเพลงที่ตรงกับคำค้นหาของคุณในฐานข้อมูลของเรา"
             else:
                 response_text = "Sorry, I couldn't find any songs matching your query in our database."
-                    
+        
+        # Save chat history for regular responses
+        if user_id != "anonymous":
+            chat_data = ChatMessageCreate(
+                user_id=user_id,
+                session_id=session_id,
+                query=question,
+                response=response_text,
+                mode=mode,
+                intent=intent_data['intent']
+            )
+            await save_chat_history(chat_data)
+    
         # 7. Return the response
         return {
             "response": response_text,
@@ -2214,7 +2242,7 @@ async def ask_question(request: Request):
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-     
+    
 
 # Run the app
 if __name__ == "__main__":

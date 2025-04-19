@@ -8,7 +8,7 @@ from pythainlp.corpus import thai_stopwords
 
 # 1. โหลดข้อมูลจากไฟล์ CSV
 print("Loading Thai song data...")
-file_path = "data/cleaned_thai_songs_lyrics.csv"  
+file_path = "data/raw/cleaned_thai_songs_lyrics.csv"  
 print(f"Attempting to load file from: {file_path}")
 df = pd.read_csv(file_path)
 
@@ -60,12 +60,13 @@ df['cleaned_lyrics'] = lyrics_processed.apply(lambda x: x['cleaned_lyrics'])
 df['tokenized_lyrics'] = lyrics_processed.apply(lambda x: x['tokenized_lyrics'])
 df['filtered_lyrics'] = lyrics_processed.apply(lambda x: x['filtered_lyrics'])
 
-# 4. สร้างฟิลด์ metadata
-print("Creating metadata field...")
+# 4. สร้างข้อมูลที่ทำความสะอาดแล้วสำหรับชื่อเพลงและศิลปิน
+print("Creating cleaned fields...")
 song_column = 'song' if 'song' in df.columns else 'Song Title'
 artist_column = 'artists' if 'artists' in df.columns else 'Artist'
 
-df['metadata'] = "track: " + df[song_column].str.lower() + " artist: " + df[artist_column].str.lower()
+df['cleaned_track_name'] = df[song_column].str.lower().str.strip()
+df['cleaned_artist'] = df[artist_column].str.lower().str.strip()
 
 # 5. สร้าง Embeddings ด้วย Ollama
 print("Generating embeddings with Ollama (Llama 3.1 model)...")
@@ -95,19 +96,31 @@ for i in range(0, len(df), batch_size):
         embedding = get_ollama_embedding(truncated_text)
         lyrics_embeddings.append(embedding)
 
-# สร้าง embeddings สำหรับ metadata
-print("Generating metadata embeddings...")
-metadata_embeddings = []
+# สร้าง embeddings สำหรับชื่อเพลง
+print("Generating track name embeddings...")
+track_name_embeddings = []
 for i in range(0, len(df), batch_size):
-    print(f"Processing metadata batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
-    batch = df['metadata'][i:i+batch_size].tolist()
+    print(f"Processing track name batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
+    batch = df['cleaned_track_name'][i:i+batch_size].tolist()
     for text in batch:
         embedding = get_ollama_embedding(text)
-        metadata_embeddings.append(embedding)
+        track_name_embeddings.append(embedding)
+
+# สร้าง embeddings สำหรับชื่อศิลปิน
+print("Generating artist embeddings...")
+artist_embeddings = []
+for i in range(0, len(df), batch_size):
+    print(f"Processing artist batch {i//batch_size + 1}/{(len(df) + batch_size - 1)//batch_size}")
+    batch = df['cleaned_artist'][i:i+batch_size].tolist()
+    for text in batch:
+        embedding = get_ollama_embedding(text)
+        artist_embeddings.append(embedding)
 
 # เพิ่ม embeddings ลงใน dataframe
 df['lyrics_embedding'] = lyrics_embeddings
-df['metadata_embedding'] = metadata_embeddings
+df['track_name_embedding'] = track_name_embeddings
+df['track_artist_embedding'] = artist_embeddings
+df['genres_embedding'] = None  # ช่องว่างสำหรับ genres embedding
 
 # 6. จัดการ IDs
 # เก็บ song_id ดั้งเดิมเป็น siamzone_id สำหรับเพลงไทย
@@ -137,7 +150,9 @@ for idx, row in df.iterrows():
         'tokenized_lyrics': row['tokenized_lyrics'],
         'filtered_lyrics': row['filtered_lyrics'],
         'lyrics_embedding': row['lyrics_embedding'],
-        'metadata_embedding': row['metadata_embedding'],
+        'track_name_embedding': row['track_name_embedding'],
+        'track_artist_embedding': row['track_artist_embedding'],
+        'genres_embedding': row['genres_embedding'],
         'siamzone_id': row['siamzone_id'],
         'language': 'thai'
     }
@@ -152,7 +167,9 @@ with open('thai_processed_songs.json', 'w', encoding='utf-8') as f:
 print("Saving combined data to CSV...")
 df_for_csv = df.copy()
 df_for_csv['lyrics_embedding'] = df_for_csv['lyrics_embedding'].apply(json.dumps)
-df_for_csv['metadata_embedding'] = df_for_csv['metadata_embedding'].apply(json.dumps)
+df_for_csv['track_name_embedding'] = df_for_csv['track_name_embedding'].apply(json.dumps)
+df_for_csv['track_artist_embedding'] = df_for_csv['track_artist_embedding'].apply(json.dumps)
+df_for_csv['genres_embedding'] = None  # ช่องว่างสำหรับ genres embedding
 
 # บันทึกเป็น CSV รวม
 df_for_csv.to_csv('thai_processed_songs.csv', index=False, encoding='utf-8')
