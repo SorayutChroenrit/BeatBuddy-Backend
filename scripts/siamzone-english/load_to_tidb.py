@@ -1,209 +1,485 @@
 import json
 import pandas as pd
 import certifi
-from sqlalchemy import create_engine, text, inspect
 import pymysql
 import logging
+import time
+import ijson  # For streaming JSON parsing
+import os
+import decimal  # Import for Decimal handling
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Explicitly tell SQLAlchemy to use PyMySQL
-pymysql.install_as_MySQLdb()
+# Custom JSON encoder to handle Decimal values
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, decimal.Decimal):
+            return float(obj)
+        return super(DecimalEncoder, self).default(obj)
 
 try:
-    # 1. Load the processed CSV file
-    logger.info("Loading CSV data...")
+    # 1. Check if the JSON file is too large
+    json_file_path = 'data/embedding/siamzoneen_embedding.json'  # English version
+    file_size_mb = os.path.getsize(json_file_path) / (1024 * 1024)
+    logger.info(f"JSON file size: {file_size_mb:.2f} MB")
     
-    # Load song data from CSV file - update the path to match your file location
-    file_path = '/content/drive/MyDrive/dataset/processed/english_processed_songs.csv'
-    logger.info(f"Reading CSV file from: {file_path}")
+    # Define vector dimension for table creation if needed
+    vector_dimension = 1536  # Adjust if your vectors have a different dimension
     
-    # Load the CSV using pandas
-    songs_df = pd.read_csv(file_path)
-    
-    # Show information about the loaded data
-    logger.info(f"Loaded {len(songs_df)} records from CSV")
-    logger.info(f"CSV columns: {songs_df.columns.tolist()}")
-    
-    # Check presence of required columns
-    required_columns = ['Song ID', 'track_name', 'track_artist', 'Lyrics', 'original_lyrics', 'cleaned_lyrics']
-    missing_columns = [col for col in required_columns if col not in songs_df.columns]
-    
-    if missing_columns:
-        logger.warning(f"Missing required columns: {missing_columns}")
-    else:
-        logger.info("All required columns present in CSV")
-    
-    # Rename columns to match database schema if needed
-    # 'Song ID' is actually the siamzone_id, not the primary key
-    column_mapping = {
-        'Song ID': 'siamzone_id',
-        'Lyrics': 'original_lyrics'
+    # Define embedding column mapping (JSON column name -> DB column name)
+    embedding_column_mapping = {
+        'lyrics_embedding': 'lyrics_embedding',
+        'track_name_embedding': 'track_name_embedding',
+        'track_artist_embedding': 'artist_embedding',  # Map JSON's track_artist_embedding to DB's artist_embedding
+        'genres_embedding': 'genres_embedding'
     }
     
-    # Make sure we're using the UUID field in 'song_id' as the primary key
-    if 'song_id' in songs_df.columns:
-        logger.info("Found 'song_id' (UUID) column to use as primary key.")
-    else:
-        logger.error("No 'song_id' (UUID) column found. This is required as the primary key.")
-        raise ValueError("Missing song_id (UUID) column in the data")
+    logger.info(f"Embedding column mapping defined: {embedding_column_mapping}")
     
-    # Only apply renaming for columns that exist and need to be renamed
-    columns_to_rename = {old: new for old, new in column_mapping.items() 
-                        if old in songs_df.columns and old != new}
+    # If the file is very large, we'll need to process it in chunks
+    large_file = file_size_mb > 100  # Consider files over 100MB as large
     
-    if columns_to_rename:
-        songs_df = songs_df.rename(columns=columns_to_rename)
-        logger.info(f"Renamed columns: {columns_to_rename}")
-    
-    # Check for embedding columns
-    has_lyrics_embedding = 'lyrics_embedding' in songs_df.columns
-    has_metadata_embedding = 'metadata_embedding' in songs_df.columns
-    
-    if has_lyrics_embedding or has_metadata_embedding:
-        logger.info("Embedding columns found in CSV")
-        # Extract embedding columns
-        embedding_columns = ['song_id']
-        if has_lyrics_embedding:
-            embedding_columns.append('lyrics_embedding')
-        if has_metadata_embedding:
-            embedding_columns.append('metadata_embedding')
-            
-        # Create embeddings DataFrame
-        embeddings_df = songs_df[embedding_columns].copy()
-        logger.info(f"Created embeddings DataFrame with {len(embeddings_df)} records")
-    else:
-        logger.info("No embedding columns found in CSV")
-        embeddings_df = pd.DataFrame(columns=['song_id'])
-
-    # 2. TiDB Connection Configuration
-    connection_string = "mysql+pymysql://TpjWXdSdsSyb73z.root:xk0bNXkyhjg9X5xb@gateway01.ap-southeast-1.prod.aws.tidbcloud.com:4000/music_recommendation"
-    
-    # Create engine with SSL configuration
-    logger.info("Connecting to TiDB with SQLAlchemy + PyMySQL...")
-    engine = create_engine(
-        connection_string,
-        connect_args={
-            "ssl": {"ca": certifi.where()},
-            "ssl_verify_identity": True
-        },
-        isolation_level="READ COMMITTED"
-    )
-
-    # 3. Get database table structure and adapt our data to it
-    with engine.connect() as connection:
-        # Using inspector to get table columns
-        inspector = inspect(engine)
+    if large_file:
+        logger.info("Large JSON file detected, using streaming approach...")
         
-        if 'songs' in inspector.get_table_names():
-            # Get existing columns in songs table
-            songs_table_columns = [col['name'] for col in inspector.get_columns('songs')]
-            logger.info(f"Songs table exists with columns: {songs_table_columns}")
-            
-            # Create a new processed DataFrame that matches the database structure
-            processed_songs_df = pd.DataFrame()
-            
-            # Map the DataFrame columns to match the database columns
-            for db_col in songs_table_columns:
-                if db_col in songs_df.columns:
-                    # Direct mapping where column names match
-                    processed_songs_df[db_col] = songs_df[db_col]
-                
-                # Special case mappings
-                elif db_col == 'cleaned_lyrics' and 'lyrics' in songs_df.columns:
-                    # Map 'lyrics' to 'cleaned_lyrics' if that's how your data is structured
-                    processed_songs_df[db_col] = songs_df['lyrics']
-                
-                # Set default values for missing columns
-                else:
-                    if db_col in ['track_album_name', 'playlist_genre', 'playlist_subgenre', 'genres', 'language', 'sentiment', 'link', 'spotify_id', 'siamzone_id']:
-                        processed_songs_df[db_col] = ''
-                    elif db_col == 'popularity_score':
-                        processed_songs_df[db_col] = 0.0
-                    else:
-                        processed_songs_df[db_col] = None
-                            
-            logger.info(f"Processed songs DataFrame to match database schema. Columns: {processed_songs_df.columns.tolist()}")
-        else:
-            logger.error("Songs table doesn't exist in the database. Please create it first.")
-            raise ValueError("Songs table doesn't exist")
-
-    # 4. Check for existing records to avoid duplicates
-    logger.info("Checking for existing records to avoid duplicates...")
-    
-    # Get all existing song_ids from the database
-    with engine.connect() as conn:
-        existing_ids_query = text("SELECT song_id FROM songs")
-        existing_ids_result = conn.execute(existing_ids_query).fetchall()
-        existing_ids = set([row[0] for row in existing_ids_result])
-    
-    # Log a sample of UUIDs to verify format    
-    if len(processed_songs_df) > 0:
-        logger.info(f"Sample song_id (UUID) from data: {processed_songs_df['song_id'].iloc[0]}")
-    
-    # Filter out records that already exist in the database
-    new_songs = processed_songs_df[~processed_songs_df['song_id'].isin(existing_ids)]
-    
-    # Only filter embeddings if we have any
-    if len(embeddings_df) > 0 and 'song_id' in embeddings_df.columns:
-        new_embeddings = embeddings_df[~embeddings_df['song_id'].isin(existing_ids)]
-    else:
-        new_embeddings = embeddings_df
-    
-    logger.info(f"Found {len(existing_ids)} existing records in the database")
-    logger.info(f"Will insert {len(new_songs)} new records (skipping {len(processed_songs_df) - len(new_songs)} duplicates)")
-    
-    # If there are no new records, we're done
-    if len(new_songs) == 0:
-        logger.info("No new records to insert. All records already exist in the database.")
-    else:
-        # 5. Load new data into songs table
-        logger.info("Loading new data into songs table...")
-        chunksize = 100  # Smaller chunks for better transaction handling
+        # First, get a count of records
+        record_count = 0
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            # Count objects in the JSON array
+            for _ in ijson.items(f, 'item'):
+                record_count += 1
+        
+        logger.info(f"Found {record_count} records in JSON file")
+        
+        # We'll process in batches
+        batch_size = 1000
+        
+        # 2. Create direct connection to TiDB
+        conn = pymysql.connect(
+            host="gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
+            port=4000,
+            user="27tLCQSVFsGqhJ9.root",
+            password="HVSvJQWvox3NSgeS",
+            database="music_recommendation",
+            ssl={"ca": certifi.where()},
+            ssl_verify_identity=True,
+            connect_timeout=180,
+            read_timeout=180,
+            write_timeout=180,
+            autocommit=False,
+            max_allowed_packet=50*1024*1024  # 50MB
+        )
+        
+        cursor = conn.cursor()
         
         try:
-            new_songs.to_sql('songs', engine, if_exists='append', index=False, chunksize=chunksize)
-            logger.info(f"Successfully loaded {len(new_songs)} new records into songs table")
-        except Exception as e:
-            logger.error(f"Error loading songs table: {str(e)}")
-            raise
-        
-        # Reset connection for the next table load
-        engine.dispose()
-        
-        # 6. Load embeddings data (if there are any embeddings with actual data)
-        if len(new_embeddings) > 0 and ('lyrics_embedding' in new_embeddings.columns or 'metadata_embedding' in new_embeddings.columns):
-            logger.info("Loading embeddings data...")
-            embedding_engine = create_engine(
-                connection_string,
-                connect_args={
-                    "ssl": {"ca": certifi.where()},
-                    "ssl_verify_identity": True
-                },
-                isolation_level="READ COMMITTED"
-            )
+            # 3. Check if songs table exists
+            cursor.execute("SHOW TABLES LIKE 'songs'")
+            songs_table_exists = cursor.fetchone() is not None
             
-            try:
-                # Process in smaller batches to avoid memory issues
-                batch_size = 500
-                total_batches = len(new_embeddings) // batch_size + (1 if len(new_embeddings) % batch_size > 0 else 0)
+            if songs_table_exists:
+                # Get existing columns in songs table
+                cursor.execute("DESCRIBE songs")
+                songs_table_columns = [row[0] for row in cursor.fetchall()]
+                logger.info(f"Songs table exists with columns: {songs_table_columns}")
+                
+                # Check if song_embeddings_vector table exists
+                cursor.execute("SHOW TABLES LIKE 'song_embeddings_vector'")
+                embeddings_table_exists = cursor.fetchone() is not None
+                
+                if not embeddings_table_exists:
+                    logger.warning("song_embeddings_vector table doesn't exist. Will attempt to create it.")
+                    # Create song_embeddings_vector table with correct column names
+                    create_embeddings_table_query = f"""
+                    CREATE TABLE IF NOT EXISTS song_embeddings_vector (
+                        song_id VARCHAR(36) PRIMARY KEY,
+                        lyrics_embedding JSON,
+                        track_name_embedding JSON,
+                        artist_embedding JSON,
+                        genres_embedding JSON,
+                        FOREIGN KEY (song_id) REFERENCES songs(song_id)
+                    )
+                    """
+                    cursor.execute(create_embeddings_table_query)
+                    conn.commit()
+                    logger.info("Created song_embeddings_vector table with correct column names.")
+                else:
+                    # Check actual columns in the embeddings table
+                    cursor.execute("DESCRIBE song_embeddings_vector")
+                    embeddings_table_columns = [row[0] for row in cursor.fetchall()]
+                    logger.info(f"song_embeddings_vector table exists with columns: {embeddings_table_columns}")
+                
+                # Get all existing song_ids from the database
+                cursor.execute("SELECT song_id FROM songs")
+                existing_ids_result = cursor.fetchall()
+                existing_ids = set([row[0] for row in existing_ids_result])
+                
+                logger.info(f"Found {len(existing_ids)} existing records in the database")
+            else:
+                logger.error("Songs table doesn't exist in the database. Please create it first.")
+                raise ValueError("Songs table doesn't exist")
+            
+            # Process in batches
+            total_inserted = 0
+            total_skipped = 0
+            batch_num = 0
+            
+            # Process song records
+            with open(json_file_path, 'r', encoding='utf-8') as f:
+                # First, peek at a single record to log its columns
+                first_record = next(ijson.items(f, 'item'), None)
+                if first_record:
+                    logger.info(f"First record column names: {list(first_record.keys())}")
+                    
+                    # Check for 'cleaned_lyrics' field - use 'lyrics' as fallback
+                    if 'cleaned_lyrics' not in first_record and 'lyrics' in first_record:
+                        logger.info("Using 'lyrics' field as 'cleaned_lyrics'")
+                    
+                    # Check embedding columns exist in the file
+                    for json_col in embedding_column_mapping.keys():
+                        if json_col not in first_record:
+                            logger.warning(f"Column '{json_col}' not found in JSON file")
+                    
+                # Reset file pointer to beginning
+                f.seek(0)
+                
+                # Read records in batches
+                records_batch = []
+                embeddings_batch = []
+                
+                for record in ijson.items(f, 'item'):
+                    if record['song_id'] not in existing_ids:
+                        # Process for songs table
+                        song_record = {
+                            'song_id': record['song_id'],
+                            'track_name': record.get('track_name', ''),
+                            'track_artist': record.get('track_artist', ''),
+                            'original_lyrics': record.get('original_lyrics', ''),
+                            # Use 'lyrics' field as fallback for 'cleaned_lyrics'
+                            'cleaned_lyrics': record.get('cleaned_lyrics', record.get('lyrics', '')),
+                            'language': 'english'  # Set to English
+                        }
+                        
+                        # Add siamzone_id if present
+                        if 'siamzone_id' in record:
+                            song_record['siamzone_id'] = record['siamzone_id']
+                        
+                        # Add record to batch
+                        records_batch.append(song_record)
+                        
+                        # Process for embeddings table
+                        embedding_record = {'song_id': record['song_id']}
+                        
+                        # Add each available embedding field using the mapping
+                        for json_col, db_col in embedding_column_mapping.items():
+                            if json_col in record and record[json_col] is not None:
+                                embedding_record[db_col] = json.dumps(record[json_col], cls=DecimalEncoder)
+                        
+                        # Only add to batch if it has at least one embedding
+                        if len(embedding_record) > 1:  # More than just 'song_id'
+                            embeddings_batch.append(embedding_record)
+                    else:
+                        total_skipped += 1
+                    
+                    # Insert batch when it reaches the specified size
+                    if len(records_batch) >= batch_size:
+                        batch_num += 1
+                        logger.info(f"Processing batch {batch_num} with {len(records_batch)} records")
+                        
+                        # Log sample columns from this batch
+                        if records_batch:
+                            logger.info(f"Sample record columns in batch {batch_num}: {list(records_batch[0].keys())}")
+                        
+                        # Insert songs using direct SQL execution
+                        if records_batch:
+                            for song in records_batch:
+                                columns = list(song.keys())
+                                placeholders = ["%s"] * len(columns)
+                                
+                                sql = f"""
+                                INSERT INTO songs 
+                                ({', '.join(columns)})
+                                VALUES ({', '.join(placeholders)})
+                                """
+                                
+                                values = tuple(song.values())
+                                try:
+                                    cursor.execute(sql, values)
+                                except Exception as e:
+                                    logger.error(f"Error inserting song {song['song_id']}: {str(e)}")
+                            
+                            total_inserted += len(records_batch)
+                        
+                        # Insert embeddings
+                        if embeddings_batch:
+                            # Log sample embedding columns
+                            if embeddings_batch:
+                                logger.info(f"Sample embedding columns in batch {batch_num}: {list(embeddings_batch[0].keys())}")
+                                
+                            for embedding in embeddings_batch:
+                                columns = list(embedding.keys())
+                                placeholders = ["%s"] * len(columns)
+                                
+                                sql = f"""
+                                INSERT INTO song_embeddings_vector 
+                                ({', '.join(columns)})
+                                VALUES ({', '.join(placeholders)})
+                                """
+                                
+                                values = tuple(embedding.values())
+                                try:
+                                    cursor.execute(sql, values)
+                                except Exception as e:
+                                    logger.error(f"Error inserting embedding for {embedding['song_id']}: {str(e)}")
+                            
+                            logger.info(f"Inserted {len(embeddings_batch)} embedding records")
+                        
+                        # Commit after each batch
+                        conn.commit()
+                        
+                        # Clear batches
+                        records_batch = []
+                        embeddings_batch = []
+                
+                # Insert any remaining records
+                if records_batch:
+                    batch_num += 1
+                    logger.info(f"Processing final batch {batch_num} with {len(records_batch)} records")
+                    
+                    # Log sample columns from final batch
+                    logger.info(f"Sample record columns in final batch: {list(records_batch[0].keys())}")
+                    
+                    # Insert songs
+                    for song in records_batch:
+                        columns = list(song.keys())
+                        placeholders = ["%s"] * len(columns)
+                        
+                        sql = f"""
+                        INSERT INTO songs 
+                        ({', '.join(columns)})
+                        VALUES ({', '.join(placeholders)})
+                        """
+                        
+                        values = tuple(song.values())
+                        try:
+                            cursor.execute(sql, values)
+                        except Exception as e:
+                            logger.error(f"Error inserting song {song['song_id']}: {str(e)}")
+                    
+                    total_inserted += len(records_batch)
+                    
+                    # Insert embeddings
+                    if embeddings_batch:
+                        # Log sample embedding columns in final batch
+                        logger.info(f"Sample embedding columns in final batch: {list(embeddings_batch[0].keys())}")
+                        
+                        for embedding in embeddings_batch:
+                            columns = list(embedding.keys())
+                            placeholders = ["%s"] * len(columns)
+                            
+                            sql = f"""
+                            INSERT INTO song_embeddings_vector 
+                            ({', '.join(columns)})
+                            VALUES ({', '.join(placeholders)})
+                            """
+                            
+                            values = tuple(embedding.values())
+                            try:
+                                cursor.execute(sql, values)
+                            except Exception as e:
+                                logger.error(f"Error inserting embedding for {embedding['song_id']}: {str(e)}")
+                        
+                        logger.info(f"Inserted {len(embeddings_batch)} embedding records in final batch")
+                    
+                    conn.commit()
+            
+            logger.info(f"Completed processing: {total_inserted} records inserted, {total_skipped} records skipped (already exist)")
+        
+        except Exception as e:
+            logger.error(f"Error during data loading: {str(e)}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            conn.close()
+    
+    else:
+        # For smaller files, we can load everything at once
+        logger.info("Loading JSON data...")
+        
+        # Load song data from JSON (not CSV!)
+        with open(json_file_path, 'r', encoding='utf-8') as f:
+            song_records = json.load(f)
+            
+        # Log columns from the first record if available
+        if song_records and len(song_records) > 0:
+            logger.info(f"JSON record columns: {list(song_records[0].keys())}")
+            
+            # Check for 'cleaned_lyrics' field - use 'lyrics' as fallback
+            if 'cleaned_lyrics' not in song_records[0] and 'lyrics' in song_records[0]:
+                logger.info("Using 'lyrics' field as 'cleaned_lyrics'")
+        
+        # Create direct connection to TiDB
+        conn = pymysql.connect(
+            host="gateway01.ap-southeast-1.prod.aws.tidbcloud.com",
+            port=4000,
+            user="27tLCQSVFsGqhJ9.root",
+            password="HVSvJQWvox3NSgeS",
+            database="music_recommendation",
+            ssl={"ca": certifi.where()},
+            ssl_verify_identity=True,
+            connect_timeout=180,
+            read_timeout=180,
+            write_timeout=180,
+            autocommit=False,
+            max_allowed_packet=50*1024*1024  # 50MB
+        )
+        
+        cursor = conn.cursor()
+        
+        try:
+            # Check if songs table exists
+            cursor.execute("SHOW TABLES LIKE 'songs'")
+            songs_table_exists = cursor.fetchone() is not None
+            
+            if songs_table_exists:
+                # Get existing columns in songs table
+                cursor.execute("DESCRIBE songs")
+                songs_table_columns = [row[0] for row in cursor.fetchall()]
+                logger.info(f"Songs table exists with columns: {songs_table_columns}")
+                
+                # Check if song_embeddings_vector table exists
+                cursor.execute("SHOW TABLES LIKE 'song_embeddings_vector'")
+                embeddings_table_exists = cursor.fetchone() is not None
+                
+                if not embeddings_table_exists:
+                    logger.warning("song_embeddings_vector table doesn't exist. Will attempt to create it.")
+                    # Create song_embeddings_vector table with correct column names
+                    create_embeddings_table_query = f"""
+                    CREATE TABLE IF NOT EXISTS song_embeddings_vector (
+                        song_id VARCHAR(36) PRIMARY KEY,
+                        lyrics_embedding JSON,
+                        track_name_embedding JSON,
+                        artist_embedding JSON,
+                        genres_embedding JSON,
+                        FOREIGN KEY (song_id) REFERENCES songs(song_id)
+                    )
+                    """
+                    cursor.execute(create_embeddings_table_query)
+                    conn.commit()
+                    logger.info("Created song_embeddings_vector table with correct column names.")
+                else:
+                    # Check actual columns in the embeddings table
+                    cursor.execute("DESCRIBE song_embeddings_vector")
+                    embeddings_table_columns = [row[0] for row in cursor.fetchall()]
+                    logger.info(f"song_embeddings_vector table exists with columns: {embeddings_table_columns}")
+                
+                # Get all existing song_ids from the database
+                cursor.execute("SELECT song_id FROM songs")
+                existing_ids_result = cursor.fetchall()
+                existing_ids = set([row[0] for row in existing_ids_result])
+                
+                logger.info(f"Found {len(existing_ids)} existing records in the database")
+                
+                # Filter out records that already exist in the database
+                new_songs = [song for song in song_records if song['song_id'] not in existing_ids]
+                logger.info(f"Will insert {len(new_songs)} new records (skipping {len(song_records) - len(new_songs)} duplicates)")
+                
+                # Process in smaller batches
+                batch_size = 100
+                total_batches = len(new_songs) // batch_size + (1 if len(new_songs) % batch_size > 0 else 0)
                 
                 for i in range(total_batches):
                     start_idx = i * batch_size
-                    end_idx = min((i + 1) * batch_size, len(new_embeddings))
-                    batch = new_embeddings.iloc[start_idx:end_idx]
+                    end_idx = min((i + 1) * batch_size, len(new_songs))
+                    batch = new_songs[start_idx:end_idx]
                     
-                    logger.info(f"Loading embeddings batch {i+1}/{total_batches} (records {start_idx+1}-{end_idx})")
-                    batch.to_sql('song_embeddings', embedding_engine, if_exists='append', index=False, chunksize=50)
+                    logger.info(f"Processing batch {i+1}/{total_batches} (records {start_idx+1}-{end_idx})")
                     
-                logger.info(f"Loaded all {len(new_embeddings)} records into song_embeddings table")
-            except Exception as e:
-                logger.error(f"Error loading song_embeddings table: {str(e)}")
-                raise
-        else:
-            logger.info("No embedding data to insert. Skipping embeddings table.")
+                    # Log sample record from this batch
+                    if batch:
+                        logger.info(f"Sample record in batch {i+1}: song_id={batch[0]['song_id']}, columns={list(batch[0].keys())}")
+                    
+                    # Insert songs
+                    for song in batch:
+                        # Create a song record with essential fields
+                        song_record = {
+                            'song_id': song['song_id'],
+                            'track_name': song.get('track_name', ''),
+                            'track_artist': song.get('track_artist', ''),
+                            'original_lyrics': song.get('original_lyrics', ''),
+                            # Use 'lyrics' field as fallback for 'cleaned_lyrics'
+                            'cleaned_lyrics': song.get('cleaned_lyrics', song.get('lyrics', '')),
+                            'language': 'english'  # Set to English
+                        }
+                        
+                        # Add siamzone_id if present
+                        if 'siamzone_id' in song:
+                            song_record['siamzone_id'] = song['siamzone_id']
+                        
+                        columns = list(song_record.keys())
+                        placeholders = ["%s"] * len(columns)
+                        
+                        sql = f"""
+                        INSERT INTO songs 
+                        ({', '.join(columns)})
+                        VALUES ({', '.join(placeholders)})
+                        """
+                        
+                        values = tuple(song_record.values())
+                        try:
+                            cursor.execute(sql, values)
+                        except Exception as e:
+                            logger.error(f"Error inserting song {song['song_id']}: {str(e)}")
+                    
+                    # Insert embeddings
+                    embedding_count = 0
+                    for song in batch:
+                        embedding_record = {'song_id': song['song_id']}
+                        
+                        # Add each available embedding field using the mapping
+                        for json_col, db_col in embedding_column_mapping.items():
+                            if json_col in song and song[json_col] is not None:
+                                embedding_record[db_col] = json.dumps(song[json_col], cls=DecimalEncoder)
+                        
+                        # Only insert if it has at least one embedding
+                        if len(embedding_record) > 1:  # More than just 'song_id'
+                            # Log the first embedding record in each batch
+                            if embedding_count == 0:
+                                logger.info(f"Sample embedding in batch {i+1}: song_id={embedding_record['song_id']}, columns={list(embedding_record.keys())}")
+                                embedding_count += 1
+                                
+                            columns = list(embedding_record.keys())
+                            placeholders = ["%s"] * len(columns)
+                            
+                            sql = f"""
+                            INSERT INTO song_embeddings_vector 
+                            ({', '.join(columns)})
+                            VALUES ({', '.join(placeholders)})
+                            """
+                            
+                            values = tuple(embedding_record.values())
+                            try:
+                                cursor.execute(sql, values)
+                            except Exception as e:
+                                logger.error(f"Error inserting embedding for {song['song_id']}: {str(e)}")
+                    
+                    # Commit after each batch
+                    conn.commit()
+                    logger.info(f"Batch {i+1} committed")
+                
+                logger.info(f"Successfully loaded {len(new_songs)} new records")
+            else:
+                logger.error("Songs table doesn't exist in the database. Please create it first.")
+                raise ValueError("Songs table doesn't exist")
+        
+        except Exception as e:
+            logger.error(f"Error during data loading: {str(e)}")
+            conn.rollback()
+        finally:
+            cursor.close()
+            conn.close()
 
     logger.info("Database operation completed successfully.")
 

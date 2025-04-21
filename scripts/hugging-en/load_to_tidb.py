@@ -17,7 +17,7 @@ pymysql.install_as_MySQLdb()
 try:
     # 1. Load the processed JSON file
     logger.info("Loading JSON data...")
-    with open('data/db-huggingface/huggingface_processed_songs.json', 'r') as f:
+    with open('data/embedding/huggingface_embeddings.json', 'r') as f:
         song_records = json.load(f)
     logger.info(f"Loaded {len(song_records)} records from JSON")
     
@@ -71,19 +71,26 @@ try:
         'siamzone_id': record['siamzone_id']
     } for record in song_records])
 
-    # Check embedding dimensions
-    embedding_dimensions = []
-    for record in song_records:
-        if 'lyrics_embedding' in record and record['lyrics_embedding']:
-            embedding_dimensions.append(len(record['lyrics_embedding']))
-            break
+    # Check embedding dimensions for all embedding types
+    embedding_dimensions = {}
+    for embedding_type in ['lyrics_embedding', 'track_name_embedding', 'artist_embedding', 'album_name_embedding']:
+        for record in song_records:
+            if embedding_type in record and record[embedding_type]:
+                embedding_dimensions[embedding_type] = len(record[embedding_type])
+                break
     
     if not embedding_dimensions:
         logger.error("No embedding vectors found in data. Cannot determine dimension.")
         raise ValueError("Missing embedding data")
     
-    vector_dimension = embedding_dimensions[0]
-    logger.info(f"Detected embedding dimension: {vector_dimension}")
+    # Verify all embeddings have the same dimension
+    dimensions = list(embedding_dimensions.values())
+    if len(set(dimensions)) > 1:
+        logger.warning(f"Different embedding dimensions found: {embedding_dimensions}")
+        logger.info("Will use the dimension of lyrics_embedding for schema")
+    
+    vector_dimension = embedding_dimensions.get('lyrics_embedding', dimensions[0])
+    logger.info(f"Using embedding dimension: {vector_dimension}")
     
     # 4. Check if tables exist and handle properly with transactions
     with engine.begin() as connection:
@@ -112,6 +119,7 @@ try:
         # Create tables regardless (IF NOT EXISTS will handle if they're already there)
         logger.info("Creating tables if they don't exist...")
         # Create tables in proper order with VECTOR type for embeddings and individual audio features
+        # Modified schema to include all four embeddings
         sql_create_table = f"""
         CREATE TABLE IF NOT EXISTS songs (
             song_id VARCHAR(36) PRIMARY KEY,
@@ -133,7 +141,9 @@ try:
         CREATE TABLE IF NOT EXISTS song_embeddings_vector (
             song_id VARCHAR(36) PRIMARY KEY,
             lyrics_embedding VECTOR({vector_dimension}) NOT NULL,
-            metadata_embedding VECTOR({vector_dimension}) NOT NULL,
+            track_name_embedding VECTOR({vector_dimension}) NOT NULL,
+            artist_embedding VECTOR({vector_dimension}) NOT NULL,
+            album_name_embedding VECTOR({vector_dimension}) NULL,
             FOREIGN KEY (song_id) REFERENCES songs(song_id)
         );
 
@@ -230,27 +240,33 @@ try:
                         logger.warning(f"Skipping record - missing song_id")
                         continue
                     
-                    # Get vector data
+                    # Get all vector data
                     lyrics_embedding = record.get('lyrics_embedding')
-                    metadata_embedding = record.get('metadata_embedding')
+                    track_name_embedding = record.get('track_name_embedding')
+                    artist_embedding = record.get('artist_embedding')
+                    album_name_embedding = record.get('album_name_embedding')
                     
-                    if not lyrics_embedding or not metadata_embedding:
-                        logger.warning(f"Skipping {song_id} - missing embedding data")
+                    # Check if all embeddings exist
+                    if not lyrics_embedding or not track_name_embedding or not artist_embedding or not album_name_embedding:
+                        logger.warning(f"Skipping {song_id} - missing one or more embedding data")
                         continue
                     
                     # Format vectors as comma-separated strings
                     lyrics_values = format_vector_values(lyrics_embedding)
-                    metadata_values = format_vector_values(metadata_embedding)
+                    track_name_values = format_vector_values(track_name_embedding)
+                    artist_values = format_vector_values(artist_embedding)
+                    album_name_values = format_vector_values(album_name_embedding)
                     
-                    # Create SQL with correct TiDB VECTOR syntax
-                    # According to TiDB docs, vectors should be inserted with the '[value1, value2, ...]' format
+                    # Create SQL with correct TiDB VECTOR syntax for all four embeddings
                     sql = f"""
                     INSERT INTO song_embeddings_vector 
-                    (song_id, lyrics_embedding, metadata_embedding)
+                    (song_id, lyrics_embedding, track_name_embedding, artist_embedding, album_name_embedding)
                     VALUES (
                         %s, 
                         '[{lyrics_values}]', 
-                        '[{metadata_values}]'
+                        '[{track_name_values}]',
+                        '[{artist_values}]',
+                        '[{album_name_values}]'
                     )
                     """
                     
@@ -378,10 +394,15 @@ try:
             # Sample query to verify audio feature columns
             sample = connection.execute(text("SELECT danceability, energy, `key`, loudness, mode, speechiness, acousticness, instrumentalness, liveness, valence, tempo FROM song_features LIMIT 1")).fetchone()
             logger.info(f"Sample audio features: {sample}")
+            
+            # Sample query to verify we have all embeddings
+            sample_embeddings = connection.execute(text("SELECT song_id FROM song_embeddings_vector LIMIT 1")).fetchone()
+            if sample_embeddings:
+                logger.info(f"Successfully verified embeddings structure for song_id: {sample_embeddings.song_id}")
     except Exception as e:
         logger.error(f"Error verifying data: {str(e)}")
     
-    logger.info(f"Successfully loaded songs into TiDB database with vector embeddings and individual audio features.")
+    logger.info(f"Successfully loaded songs into TiDB database with individual vector embeddings and audio features.")
 
 except Exception as e:
     logger.error(f"An error occurred: {str(e)}")
