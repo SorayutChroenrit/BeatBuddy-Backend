@@ -1,10 +1,10 @@
-pandas
-numpy
-scikit-learn
-pymysql
-SQLAlchemy
+fastapi
+uvicorn
 ollama
-fsspec 
-huggingface_hub
+sqlalchemy
+pymysql
+numpy
 langdetect
 pythainlp
+sentence-transformers
+pydantic
