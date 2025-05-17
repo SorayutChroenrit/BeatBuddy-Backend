@@ -57,17 +57,6 @@ async def add_security_headers(request, call_next):
     return response
 
 
-@app.get("/debug-oauth")
-async def debug_oauth():
-    """Debug OAuth configuration"""
-    return {
-        "google_client_id": settings.GOOGLE_CLIENT_ID,
-        "redirect_uri": OAUTH_PROVIDERS["google"]["redirect_uri"],
-        "frontend_url": settings.FRONTEND_URL,
-        "authorize_url": OAUTH_PROVIDERS["google"]["authorize_url"],
-        "user_info_url": OAUTH_PROVIDERS["google"]["user_info_url"],
-    }
-
 # Music endpoints
 @app.post("/ask", response_model=AskQuestionResponse)
 async def ask_question(

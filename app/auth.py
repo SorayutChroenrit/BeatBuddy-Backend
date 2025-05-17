@@ -19,7 +19,7 @@ OAUTH_PROVIDERS = {
         "token_url": "https://oauth2.googleapis.com/token",
         "user_info_url": "https://www.googleapis.com/oauth2/v2/userinfo",
         "scope": " email",
-        "redirect_uri": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
+        "redirect_url": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
     },
     "github": {
         "client_id": settings.GITHUB_CLIENT_ID,
@@ -28,7 +28,7 @@ OAUTH_PROVIDERS = {
         "token_url": "https://github.com/login/oauth/access_token",
         "user_info_url": "https://api.github.com/user",
         "scope": "user:email",
-        "redirect_uri": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/github"
+        "redirect_url": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/github"
 
     }
 }
