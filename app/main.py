@@ -140,7 +140,7 @@ async def signin(provider: str, request: Request):
     config = OAUTH_PROVIDERS[provider]
     state = generate_state()
     
-    host = request.headers.get("host", "localhost:8000")
+    host = request.headers.get("host", "https://beatbuddy-backend-zvso.onrender.com")
     scheme = request.headers.get("x-forwarded-proto", "http")
     redirect_uri = f"{scheme}://{host}/api/auth/callback/{provider}"
     

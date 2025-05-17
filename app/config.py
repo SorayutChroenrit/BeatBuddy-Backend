@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "BEATBUDDY_SECRET"
     
     # CORS
-    FRONTEND_URL: str = "http://localhost:5173"
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
     
     # External APIs
     GROQ_API_KEY: str = ""
