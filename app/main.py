@@ -246,7 +246,7 @@ async def oauth_callback(
         session_token = create_jwt_token(user.id)
         
         # Redirect to frontend with secure cookies
-        response = RedirectResponse(url=f"{settings.FRONTEND_URL}/#/auth/callback")
+        response = RedirectResponse(url=f"{settings.FRONTEND_URL}/BeatBuddy/#/auth/callback")
         response.set_cookie(
             key="session-token", 
             value=session_token, 
@@ -257,7 +257,7 @@ async def oauth_callback(
         )
         response.delete_cookie(f"oauth_state_{provider}")
         
-        print(f"Authentication successful, redirecting to: {settings.FRONTEND_URL}/#/auth/callback")
+        print(f"Authentication successful, redirecting to: {settings.FRONTEND_URL}/BeatBuddy/#/auth/callback")
         return response
     except Exception as e:
         print(f"Exception in OAuth callback: {str(e)}")
