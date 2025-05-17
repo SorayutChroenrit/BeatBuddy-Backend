@@ -304,6 +304,51 @@ async def google_verification(rest_of_path: str):
     file_content = """google-site-verification: google50108aa7baf4f0ce.html"""
     return HTMLResponse(content=file_content)
 
+@app.get("/test-google-auth")
+async def test_google_auth():
+    """Test Google OAuth with manual parameters"""
+    client_id = settings.GOOGLE_CLIENT_ID
+    redirect_uri = "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
+    
+    # Encode the redirect URI properly
+    encoded_redirect = urllib.parse.quote(redirect_uri, safe='')
+    
+    # Build the URL with correct parameters
+    auth_url = (
+        f"https://accounts.google.com/oauth2/v2/auth?"
+        f"client_id={client_id}&"
+        f"redirect_uri={encoded_redirect}&"
+        f"response_type=code&"
+        f"scope=email&"
+        f"state=test12345&"
+        f"access_type=offline&"
+        f"prompt=consent"
+    )
+    
+    # Return both the URL and a page with a link
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><title>Test Google Auth</title></head>
+    <body>
+        <h1>Test Google Auth</h1>
+        <p>URL: {auth_url}</p>
+        <a href="{auth_url}" target="_blank">Click here to test Google Auth</a>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/test-google-config")
+async def test_google_config():
+    """Show Google OAuth configuration"""
+    return {
+        "client_id": settings.GOOGLE_CLIENT_ID[:10] + "..." if settings.GOOGLE_CLIENT_ID else None,
+        "client_id_length": len(settings.GOOGLE_CLIENT_ID) if settings.GOOGLE_CLIENT_ID else 0,
+        "redirect_uri": OAUTH_PROVIDERS["google"]["redirect_uri"] if "redirect_uri" in OAUTH_PROVIDERS["google"] else None,
+        "redirect_url": OAUTH_PROVIDERS["google"]["redirect_url"] if "redirect_url" in OAUTH_PROVIDERS["google"] else None,
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
