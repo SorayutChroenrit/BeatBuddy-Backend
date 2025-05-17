@@ -155,16 +155,16 @@ async def signin(provider: str, request: Request):
     nonce = secrets.token_urlsafe(16)
     
     # Use the pre-configured redirect URI
-    redirect_url = config["redirect_url"]
+    redirect_uri = config["redirect_uri"]
 
     # Create OAuth parameters with enhanced security
     params = {
         "client_id": config["client_id"],
-        "redirect_url": redirect_url,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": config["scope"],
         "state": state,
-        "nonce": nonce  # Add nonce for extra security
+        "nonce": nonce 
     }
     
     # Add provider-specific parameters
@@ -230,12 +230,12 @@ async def oauth_callback(
     try:
         # Use the pre-configured redirect URI
         config = OAUTH_PROVIDERS[provider]
-        redirect_url = config["redirect_url"]
+        redirect_uri = config["redirect_uri"]
         
-        logger.debug(f"Using fixed redirect URI: {redirect_url}")
+        logger.debug(f"Using fixed redirect URI: {redirect_uri}")
         
         # Exchange code for token
-        token_data = await exchange_code_for_token(provider, code, redirect_url)
+        token_data = await exchange_code_for_token(provider, code, redirect_uri)
         access_token = token_data.get("access_token")
         
         if not access_token:

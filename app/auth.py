@@ -19,7 +19,7 @@ OAUTH_PROVIDERS = {
         "token_url": "https://oauth2.googleapis.com/token",
         "user_info_url": "https://www.googleapis.com/oauth2/v2/userinfo",
         "scope": " email",
-        "redirect_url": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
+        "redirect_uri": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
     },
     "github": {
         "client_id": settings.GITHUB_CLIENT_ID,
@@ -28,8 +28,7 @@ OAUTH_PROVIDERS = {
         "token_url": "https://github.com/login/oauth/access_token",
         "user_info_url": "https://api.github.com/user",
         "scope": "user:email",
-        "redirect_url": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/github"
-
+        "redirect_uri": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/github"
     }
 }
 
@@ -65,7 +64,7 @@ async def get_current_user(request: Request, db: Session = Depends(get_db)) -> O
 def generate_state() -> str:
     return secrets.token_urlsafe(32)
 
-async def exchange_code_for_token(provider: str, code: str, redirect_url: str) -> Dict[str, Any]:
+async def exchange_code_for_token(provider: str, code: str, redirect_uri: str) -> Dict[str, Any]:
     """Exchange authorization code for access token with better error handling"""
     provider_config = OAUTH_PROVIDERS[provider]
     
@@ -74,14 +73,14 @@ async def exchange_code_for_token(provider: str, code: str, redirect_url: str) -
         "client_id": provider_config["client_id"],
         "client_secret": provider_config["client_secret"],
         "code": code,
-        "redirect_url": redirect_url
+        "redirect_uri": redirect_uri
     }
     
     headers = {"Accept": "application/json"}
     
     try:
         print(f"Exchanging code for token with provider: {provider}")
-        print(f"Using redirect URI: {redirect_url}")
+        print(f"Using redirect URI: {redirect_uri}")
         
         async with httpx.AsyncClient() as client:
             response = await client.post(
