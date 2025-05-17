@@ -133,66 +133,53 @@ async def get_session(current_user: User = Depends(get_current_user)):
 
 @app.get("/api/auth/signin/{provider}")
 async def signin(provider: str, request: Request):
-    """Start OAuth flow"""
+    """Start OAuth flow with fixed redirect URIs"""
     if provider not in OAUTH_PROVIDERS:
         raise HTTPException(status_code=400, detail="Invalid provider")
     
     config = OAUTH_PROVIDERS[provider]
     state = generate_state()
     
-    host = request.headers.get("host", settings.BACKEND_URL.replace("https://", "").replace("http://", ""))
-    scheme = request.headers.get("x-forwarded-proto", "https" if settings.BACKEND_URL.startswith("https") else "http")
-    redirect_uri = f"{scheme}://{host}/api/auth/callback/{provider}"
+    # Use the pre-configured redirect URI instead of constructing it dynamically
+    redirect_uri = config["redirect_uri"]
+
+    # Use the standard Google OAuth URL structure
+    params = {
+        "client_id": config["client_id"],
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": config["scope"],
+        "state": state
+    }
     
-    # Debug information
-    print(f"DEBUG: OAuth signin request for {provider}")
-    print(f"DEBUG: Host header: {host}")
-    print(f"DEBUG: Scheme: {scheme}")
-    print(f"DEBUG: Constructed redirect_uri: {redirect_uri}")
-    print(f"DEBUG: Client ID being used: {config['client_id'][:5]}...")
-    
-    # Use different endpoints for different providers
-    base_url = config["authorize_url"]
+    # Add Google-specific parameters if needed
     if provider == "google":
-        # Use the working Google OAuth URL structure
-        base_url = "https://accounts.google.com/o/oauth2/v2/auth/oauthchooseaccount"
-        
-        params = {
-            "client_id": config["client_id"],
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": "email",  # Simplified scope
-            "access_type": "offline",
-            "service": "lso",
-            "o2v": "2",
-            "flowName": "GeneralOAuthFlow",
-            "state": state
-        }
-    else:
-        # For other providers, use the original approach
-        params = {
-            "client_id": config["client_id"],
-            "redirect_uri": redirect_uri,
-            "scope": config["scope"],
-            "response_type": "code",
-            "state": state
-        }
+        params["access_type"] = "offline"
+        params["prompt"] = "select_account"  
     
-    auth_url = f"{base_url}?{urllib.parse.urlencode(params)}"
+    auth_url = f"{config['authorize_url']}?{urllib.parse.urlencode(params)}"
     print(f"DEBUG: Full auth URL: {auth_url}")
     
-    # Create response with redirect
+    # Create response with redirect and secure cookies
     response = RedirectResponse(url=auth_url)
-    response.set_cookie(f"oauth_state_{provider}", state, httponly=True, max_age=600)
+    response.set_cookie(
+        key=f"oauth_state_{provider}",
+        value=state,
+        httponly=True,
+        secure=True,  
+        samesite="lax",  
+        max_age=600
+    )
     
     return response
+
 @app.get("/api/auth/callback/{provider}")
 async def oauth_callback(
     provider: str,
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Handle OAuth callback"""
+    """Handle OAuth callback with fixed redirect URIs"""
     print(f"\n======= OAUTH CALLBACK =======")
     print(f"Provider: {provider}")
     print(f"URL: {request.url}")
@@ -222,22 +209,35 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail="Invalid OAuth response: " + ", ".join(error_detail))
     
     try:
-        # Continue with your original code
-        redirect_uri = f"{request.base_url}api/auth/callback/{provider}"
-        print(f"Using redirect URI: {redirect_uri}")
+        # Use the pre-configured redirect URI instead of constructing it dynamically
+        config = OAUTH_PROVIDERS[provider]
+        redirect_uri = config["redirect_uri"]
         
+        print(f"Using fixed redirect URI: {redirect_uri}")
+        
+        # Exchange code for token
         token_data = await exchange_code_for_token(provider, code, redirect_uri)
         access_token = token_data.get("access_token")
         
         if not access_token:
             print("Failed to get access token")
+            print(f"Token response: {token_data}")
             raise HTTPException(status_code=400, detail="Failed to get access token")
         
         print("Successfully obtained access token")
         
         # Get user info
         user_info = await get_user_info(provider, access_token)
-        provider_id = str(user_info.get("id"))
+        
+        # Get provider ID based on the provider
+        if provider == "google":
+            provider_id = user_info.get("id") or user_info.get("sub")
+        else:
+            provider_id = str(user_info.get("id"))
+        
+        if not provider_id:
+            print(f"Missing provider ID in user info: {user_info}")
+            raise HTTPException(status_code=400, detail="Failed to get user ID from provider")
         
         # Create/update user
         user = create_or_update_user(db, user_info, provider, provider_id)
@@ -245,9 +245,16 @@ async def oauth_callback(
         # Create session
         session_token = create_jwt_token(user.id)
         
-        # Redirect to frontend
+        # Redirect to frontend with secure cookies
         response = RedirectResponse(url=f"{settings.FRONTEND_URL}/#/auth/callback")
-        response.set_cookie("session-token", session_token, httponly=True, max_age=7*24*60*60)
+        response.set_cookie(
+            key="session-token", 
+            value=session_token, 
+            httponly=True,
+            secure=True,  
+            samesite="none",  
+            max_age=7*24*60*60
+        )
         response.delete_cookie(f"oauth_state_{provider}")
         
         print(f"Authentication successful, redirecting to: {settings.FRONTEND_URL}/#/auth/callback")
@@ -255,7 +262,8 @@ async def oauth_callback(
     except Exception as e:
         print(f"Exception in OAuth callback: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
-    
+
+
 @app.get("/api/debug/config")
 async def debug_config():
     """Debug endpoint to check configuration"""
