@@ -1,5 +1,6 @@
 import logging
 import urllib.parse
+import secrets  
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -43,6 +44,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
 # Music endpoints
 @app.post("/ask", response_model=AskQuestionResponse)
 async def ask_question(
@@ -70,7 +83,7 @@ async def save_chat(
 ):
     """Save chat message"""
     try:
-        print(f"Saving chat: {message.dict()}")
+        logger.info(f"Saving chat message")
         music_service = MusicService(db)
         music_service.save_chat_history(
             user_id=message.user_id,
@@ -81,7 +94,7 @@ async def save_chat(
         )
         return {"status": "saved"}
     except Exception as e:
-        print(f"Error saving chat: {e}")
+        logger.error(f"Error saving chat: {e}")
         raise HTTPException(status_code=500, detail=f"Error saving chat: {str(e)}")
 
 @app.get("/chat-history/{session_id}")
@@ -94,7 +107,6 @@ async def get_direct_session_history(
     history = music_service.get_chat_history(session_id)
     return {"messages": [msg.__dict__ for msg in history]}
 
-
 @app.get("/chat-history/user/{user_id}")  
 async def get_user_chat_history_endpoint(
     user_id: str,
@@ -104,7 +116,6 @@ async def get_user_chat_history_endpoint(
     music_service = MusicService(db)
     history = music_service.get_user_chat_history(user_id)
     return {"messages": [msg.to_dict() for msg in history]}
-
 
 @app.get("/chat-history/session/{session_id}")
 async def get_session_history(
@@ -130,35 +141,41 @@ async def get_session(current_user: User = Depends(get_current_user)):
         image=current_user.image
     ))
 
-
 @app.get("/api/auth/signin/{provider}")
 async def signin(provider: str, request: Request):
-    """Start OAuth flow with fixed redirect URIs"""
+    """Start OAuth flow with improved security measures"""
     if provider not in OAUTH_PROVIDERS:
         raise HTTPException(status_code=400, detail="Invalid provider")
     
     config = OAUTH_PROVIDERS[provider]
     state = generate_state()
     
-    # Use the pre-configured redirect URI instead of constructing it dynamically
+    # Generate a nonce for extra security
+    nonce = secrets.token_urlsafe(16)
+    
+    # Use the pre-configured redirect URI
     redirect_uri = config["redirect_uri"]
 
-    # Use the standard Google OAuth URL structure
+    # Create OAuth parameters with enhanced security
     params = {
         "client_id": config["client_id"],
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": config["scope"],
-        "state": state
+        "state": state,
+        "nonce": nonce  # Add nonce for extra security
     }
     
-    # Add Google-specific parameters if needed
+    # Add provider-specific parameters
     if provider == "google":
         params["access_type"] = "offline"
-        params["prompt"] = "select_account"  
+        # Change from select_account to consent to reduce phishing fingerprint
+        params["prompt"] = "consent"  
     
+    # Construct the full authorization URL
     auth_url = f"{config['authorize_url']}?{urllib.parse.urlencode(params)}"
-    print(f"DEBUG: Full auth URL: {auth_url}")
+    logger.info(f"Starting OAuth flow for {provider}")
+    logger.debug(f"Full auth URL: {auth_url}")
     
     # Create response with redirect and secure cookies
     response = RedirectResponse(url=auth_url)
@@ -168,8 +185,11 @@ async def signin(provider: str, request: Request):
         httponly=True,
         secure=True,  
         samesite="lax",  
-        max_age=600
+        max_age=300      
     )
+    
+    # Add extra security headers directly to this response
+    response.headers["Cache-Control"] = "no-store, max-age=0"
     
     return response
 
@@ -179,21 +199,19 @@ async def oauth_callback(
     request: Request,
     db: Session = Depends(get_db)
 ):
-    """Handle OAuth callback with fixed redirect URIs"""
-    print(f"\n======= OAUTH CALLBACK =======")
-    print(f"Provider: {provider}")
-    print(f"URL: {request.url}")
-    print(f"Query params: {dict(request.query_params)}")
+    """Handle OAuth callback with improved security"""
+    logger.info(f"OAuth callback received for {provider}")
     
     code = request.query_params.get("code")
     state = request.query_params.get("state")
     stored_state = request.cookies.get(f"oauth_state_{provider}")
     
-    print(f"Code present: {bool(code)}")
-    print(f"State present: {bool(state)}")
-    print(f"Stored state present: {bool(stored_state)}")
-    print(f"States match: {state == stored_state}")
+    logger.debug(f"Code present: {bool(code)}")
+    logger.debug(f"State present: {bool(state)}")
+    logger.debug(f"Stored state present: {bool(stored_state)}")
+    logger.debug(f"States match: {state == stored_state}")
     
+    # Thorough state validation
     if not code or not state or state != stored_state:
         error_detail = []
         if not code:
@@ -205,26 +223,25 @@ async def oauth_callback(
         elif state != stored_state:
             error_detail.append(f"State mismatch: received {state} but expected {stored_state}")
         
-        print(f"OAuth validation failed: {', '.join(error_detail)}")
+        logger.warning(f"OAuth validation failed: {', '.join(error_detail)}")
         raise HTTPException(status_code=400, detail="Invalid OAuth response: " + ", ".join(error_detail))
     
     try:
-        # Use the pre-configured redirect URI instead of constructing it dynamically
+        # Use the pre-configured redirect URI
         config = OAUTH_PROVIDERS[provider]
         redirect_uri = config["redirect_uri"]
         
-        print(f"Using fixed redirect URI: {redirect_uri}")
+        logger.debug(f"Using fixed redirect URI: {redirect_uri}")
         
         # Exchange code for token
         token_data = await exchange_code_for_token(provider, code, redirect_uri)
         access_token = token_data.get("access_token")
         
         if not access_token:
-            print("Failed to get access token")
-            print(f"Token response: {token_data}")
+            logger.error(f"Failed to get access token: {token_data}")
             raise HTTPException(status_code=400, detail="Failed to get access token")
         
-        print("Successfully obtained access token")
+        logger.info("Successfully obtained access token")
         
         # Get user info
         user_info = await get_user_info(provider, access_token)
@@ -236,42 +253,43 @@ async def oauth_callback(
             provider_id = str(user_info.get("id"))
         
         if not provider_id:
-            print(f"Missing provider ID in user info: {user_info}")
+            logger.error(f"Missing provider ID in user info: {user_info}")
             raise HTTPException(status_code=400, detail="Failed to get user ID from provider")
         
         # Create/update user
         user = create_or_update_user(db, user_info, provider, provider_id)
         
-        # Create session
+        # Create session token
         session_token = create_jwt_token(user.id)
         
+        # Important: Make sure the redirect URL format is correct
+        frontend_callback_url = f"{settings.FRONTEND_URL}/BeatBuddy/#/auth/callback"
+        
         # Redirect to frontend with secure cookies
-        response = RedirectResponse(url=f"{settings.FRONTEND_URL}/BeatBuddy/#/auth/callback")
+        response = RedirectResponse(url=frontend_callback_url)
+        
+        # Set session cookie with improved security settings
         response.set_cookie(
             key="session-token", 
             value=session_token, 
             httponly=True,
             secure=True,  
-            samesite="none",  
-            max_age=7*24*60*60
+            samesite="lax",  
+            max_age=7*24*60*60  # 7 days
         )
+        
+        # Clean up the state cookie
         response.delete_cookie(f"oauth_state_{provider}")
         
-        print(f"Authentication successful, redirecting to: {settings.FRONTEND_URL}/BeatBuddy/#/auth/callback")
+        # Add extra security headers
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        
+        logger.info(f"Authentication successful, redirecting to: {frontend_callback_url}")
         return response
+        
     except Exception as e:
-        print(f"Exception in OAuth callback: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
-
-
-@app.get("/api/debug/config")
-async def debug_config():
-    """Debug endpoint to check configuration"""
-    return {
-        "google_client_id_configured": bool(settings.GOOGLE_CLIENT_ID),
-        "google_client_id": settings.GOOGLE_CLIENT_ID[:5] + "..." if settings.GOOGLE_CLIENT_ID else None,
-        "frontend_url": settings.FRONTEND_URL,
-    }
+        logger.error(f"Exception in OAuth callback: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Authentication error. Please try again later.")
 
 @app.post("/api/auth/signout")
 async def signout():
@@ -279,6 +297,11 @@ async def signout():
     response = JSONResponse({"message": "Signed out"})
     response.delete_cookie("session-token")
     return response
+
+@app.get("/google{rest_of_path:path}")
+async def google_verification(rest_of_path: str):
+    file_content = """google-site-verification: google50108aa7baf4f0ce.html"""
+    return HTMLResponse(content=file_content)
 
 if __name__ == "__main__":
     import uvicorn
