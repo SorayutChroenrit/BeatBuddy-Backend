@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
 from sqlalchemy.orm import Session
+import httpx
 
 # Local imports
 from app.config import settings
@@ -304,50 +305,108 @@ async def google_verification(rest_of_path: str):
     file_content = """google-site-verification: google50108aa7baf4f0ce.html"""
     return HTMLResponse(content=file_content)
 
-@app.get("/test-google-auth")
-async def test_google_auth():
-    """Test Google OAuth with manual parameters"""
-    client_id = settings.GOOGLE_CLIENT_ID
-    redirect_uri = "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
+@app.get("/debug-oauth-flow")
+async def debug_oauth_flow():
+    """Debug the OAuth flow with detailed information"""
+    google_config = OAUTH_PROVIDERS["google"]
     
-    # Encode the redirect URI properly
-    encoded_redirect = urllib.parse.quote(redirect_uri, safe='')
+    # Create a test OAuth URL
+    test_state = generate_state()
+    test_nonce = secrets.token_urlsafe(16)
     
-    # Build the URL with correct parameters
-    auth_url = (
-        f"https://accounts.google.com/oauth2/v2/auth?"
-        f"client_id={client_id}&"
-        f"redirect_uri={encoded_redirect}&"
-        f"response_type=code&"
-        f"scope=email&"
-        f"state=test12345&"
-        f"access_type=offline&"
-        f"prompt=consent"
-    )
+    test_params = {
+        "client_id": google_config["client_id"],
+        "redirect_uri": google_config["redirect_uri"],
+        "response_type": "code",
+        "scope": google_config["scope"],
+        "state": test_state,
+        "nonce": test_nonce,
+        "access_type": "offline",
+        "prompt": "consent"
+    }
     
-    # Return both the URL and a page with a link
+    test_auth_url = f"{google_config['authorize_url']}?{urllib.parse.urlencode(test_params)}"
+    
+    # Test connectivity to Google's endpoints
+    connectivity_results = {}
+    urls_to_test = [
+        google_config["authorize_url"],
+        google_config["token_url"],
+        google_config["user_info_url"]
+    ]
+    
+    for url in urls_to_test:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url)
+                connectivity_results[url] = {
+                    "status": response.status_code,
+                    "reachable": True
+                }
+        except Exception as e:
+            connectivity_results[url] = {
+                "status": None,
+                "reachable": False,
+                "error": str(e)
+            }
+    
+    # Create an HTML page with test buttons and debug info
     html_content = f"""
     <!DOCTYPE html>
     <html>
-    <head><title>Test Google Auth</title></head>
+    <head>
+        <title>OAuth Flow Debug</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }}
+            pre {{ background: #f4f4f4; padding: 10px; overflow-x: auto; }}
+            .section {{ margin-bottom: 30px; border-bottom: 1px solid #eee; padding-bottom: 20px; }}
+            button {{ padding: 10px 15px; background: #4285f4; color: white; border: none; cursor: pointer; }}
+            button:hover {{ background: #3367d6; }}
+        </style>
+    </head>
     <body>
-        <h1>Test Google Auth</h1>
-        <p>URL: {auth_url}</p>
-        <a href="{auth_url}" target="_blank">Click here to test Google Auth</a>
+        <h1>OAuth Flow Debug</h1>
+        
+        <div class="section">
+            <h2>1. Test OAuth URL</h2>
+            <p>This URL should redirect you to Google's authentication page:</p>
+            <pre>{test_auth_url}</pre>
+            <p><a href="{test_auth_url}" target="_blank"><button>Test Google OAuth</button></a></p>
+        </div>
+        
+        <div class="section">
+            <h2>2. Connectivity Tests</h2>
+            <p>Testing connectivity to Google's OAuth endpoints:</p>
+            <pre>{connectivity_results}</pre>
+        </div>
+        
+        <div class="section">
+            <h2>3. OAuth Configuration</h2>
+            <p>Your current OAuth configuration:</p>
+            <pre>
+Client ID: {google_config["client_id"][:10]}...
+Redirect URI: {google_config["redirect_uri"]}
+Scope: {google_config["scope"]}
+Authorize URL: {google_config["authorize_url"]}
+Token URL: {google_config["token_url"]}
+User Info URL: {google_config["user_info_url"]}
+            </pre>
+        </div>
+        
+        <div class="section">
+            <h2>4. Testing Direct Callback</h2>
+            <p>Add test query parameters to your callback URL to test if it's working:</p>
+            <a href="{google_config["redirect_uri"]}?code=test_code&state={test_state}" target="_blank">
+                <button>Test Callback URL Directly</button>
+            </a>
+        </div>
     </body>
     </html>
     """
+    
     return HTMLResponse(content=html_content)
 
-@app.get("/test-google-config")
-async def test_google_config():
-    """Show Google OAuth configuration"""
-    return {
-        "client_id": settings.GOOGLE_CLIENT_ID[:10] + "..." if settings.GOOGLE_CLIENT_ID else None,
-        "client_id_length": len(settings.GOOGLE_CLIENT_ID) if settings.GOOGLE_CLIENT_ID else 0,
-        "redirect_uri": OAUTH_PROVIDERS["google"]["redirect_uri"] if "redirect_uri" in OAUTH_PROVIDERS["google"] else None,
-        "redirect_url": OAUTH_PROVIDERS["google"]["redirect_url"] if "redirect_url" in OAUTH_PROVIDERS["google"] else None,
-    }
+
 
 if __name__ == "__main__":
     import uvicorn
