@@ -159,7 +159,7 @@ async def signin(provider: str, request: Request):
 
     # Create OAuth parameters with enhanced security
     params = {
-        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_id": config["client_id"],
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": config["scope"],
@@ -191,7 +191,9 @@ async def signin(provider: str, request: Request):
     
     # Add extra security headers directly to this response
     response.headers["Cache-Control"] = "no-store, max-age=0"
-    
+    logger.info(f"Using client_id: {config['client_id']}")
+    logger.info(f"Using authorize_url: {config['authorize_url']}")
+    logger.info(f"Using scope: {config['scope']}")
     return response
 
 @app.get("/api/auth/callback/{provider}")

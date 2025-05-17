@@ -15,10 +15,10 @@ OAUTH_PROVIDERS = {
     "google": {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "client_secret": settings.GOOGLE_CLIENT_SECRET,
-        "authorize_url": "https://accounts.google.com/oauth2/v2/auth",
+        "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",  
         "token_url": "https://oauth2.googleapis.com/token",
         "user_info_url": "https://www.googleapis.com/oauth2/v2/userinfo",
-        "scope": " email",
+        "scope": "email profile",  
         "redirect_uri": "https://beatbuddy-backend-zvso.onrender.com/api/auth/callback/google"
     },
     "github": {
