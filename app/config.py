@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     # OAuth
     GOOGLE_CLIENT_ID: str
     GOOGLE_CLIENT_SECRET: str
-    GITHUB_CLIENT_ID: str = ""
-    GITHUB_CLIENT_SECRET: str = ""
+    GITHUB_CLIENT_ID: str 
+    GITHUB_CLIENT_SECRET: str 
     
     # JWT
     JWT_SECRET: str
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     BACKEND_URL: str
     
     # External APIs
-    GROQ_API_KEY: str = ""
+    GROQ_API_KEY: str 
     
     class Config:
         env_file = ".env"
