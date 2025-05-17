@@ -277,7 +277,7 @@ async def oauth_callback(
             value=session_token, 
             httponly=True,
             secure=True,  
-            samesite="lax",  
+            samesite="none",  
             max_age=7*24*60*60  # 7 days
         )
         
