@@ -1389,16 +1389,38 @@ Answer ONLY "YES" or "NO" - no explanations."""
         mode: str,
         intent: str = "general_query"
     ):
-        """Save chat to database with robust connection handling"""
+        """Save chat to database with improved connection handling"""
+        from sqlalchemy.orm import Session
+        from app.database import engine, get_db_context
         from sqlalchemy import text
+        
         max_retries = 3
         retry_count = 0
         backoff_factor = 0.5
         
+        # Create chat history object outside the connection attempt
+        chat = ChatHistory(
+            user_id=user_id,
+            session_id=session_id,
+            query=query,
+            response=response,
+            mode=mode,
+            intent=intent
+        )
+        
         while retry_count < max_retries:
+            # Always use a fresh session for this operation
+            fresh_db = None
             try:
-                # Create new chat history entry
-                chat = ChatHistory(
+                # Create a completely new session each time
+                fresh_db = Session(bind=engine)
+                
+                # Test connection explicitly
+                fresh_db.execute(text("SELECT 1"))
+                logger.debug(f"Connection test successful for session {session_id}")
+                
+                # Clone the chat object to avoid any potential state issues
+                fresh_chat = ChatHistory(
                     user_id=user_id,
                     session_id=session_id,
                     query=query,
@@ -1407,62 +1429,55 @@ Answer ONLY "YES" or "NO" - no explanations."""
                     intent=intent
                 )
                 
-                # Try to add directly to the current session
-                try:
-                    # First check if the session is valid
-                    self.db.execute(text("SELECT 1"))
-                    self.db.add(chat)
-                    self.db.commit()
-                    logger.info(f"Successfully saved chat history for session {session_id}")
-                    return chat
-                except Exception as db_error:
-                    # If the current session fails, rollback and use a fresh session
-                    logger.warning(f"Error using existing session: {str(db_error)}")
-                    try:
-                        self.db.rollback()
-                    except:
-                        pass
-                    
-                    # Create a fresh session
-                    from sqlalchemy.orm import Session
-                    from app.database import engine
-                    
-                    with Session(bind=engine) as fresh_db:
-                        # Test the connection
-                        fresh_db.execute(text("SELECT 1"))
-                        
-                        # Add and commit
-                        fresh_db.add(chat)
-                        fresh_db.commit()
-                        logger.info(f"Successfully saved chat history using fresh session for {session_id}")
-                        return chat
-                    
+                # Add and commit in a single transaction
+                fresh_db.add(fresh_chat)
+                fresh_db.commit()
+                
+                logger.info(f"Successfully saved chat history for session {session_id}")
+                return fresh_chat
+                
             except Exception as e:
                 retry_count += 1
                 error_msg = str(e)
+                
+                # Try to rollback if possible
+                if fresh_db:
+                    try:
+                        fresh_db.rollback()
+                    except:
+                        pass
                 
                 # Check for specific connection error patterns
                 is_connection_error = any(err in error_msg.lower() for err in 
                                         ["connection closed", "broken pipe", "reset by peer", 
                                         "not connected", "timeout", "connection refused"])
                 
-                if is_connection_error and retry_count < max_retries:
+                if retry_count < max_retries:
                     # Calculate backoff time with exponential increase
                     backoff_time = backoff_factor * (2 ** (retry_count - 1))
-                    logger.warning(f"Connection error in save_chat_history, retry {retry_count}/{max_retries} after {backoff_time}s: {error_msg}")
+                    logger.warning(f"Error in save_chat_history (attempt {retry_count}/{max_retries}), retry after {backoff_time}s: {error_msg}")
                     time.sleep(backoff_time)
+                    
+                    # If connection pool might be corrupted, reset it
+                    if is_connection_error:
+                        try:
+                            logger.warning("Resetting connection pool")
+                            engine.dispose()
+                        except Exception as dispose_error:
+                            logger.error(f"Error disposing engine: {str(dispose_error)}")
                 else:
-                    logger.error(f"Error saving chat history (attempt {retry_count}/{max_retries}): {error_msg}")
-                    if retry_count < max_retries:
-                        # Standard backoff for non-connection errors
-                        time.sleep(backoff_factor * retry_count)
-                    else:
-                        # If we've exhausted retries, log and continue
-                        logger.error(f"Failed to save chat history after {max_retries} attempts")
-                        break
+                    logger.error(f"Failed to save chat history after {max_retries} attempts: {error_msg}")
+                    break
+            finally:
+                # Always ensure the session is properly closed
+                if fresh_db:
+                    try:
+                        fresh_db.close()
+                    except Exception as close_error:
+                        logger.error(f"Error closing session: {str(close_error)}")
         
         return None
-    
+
     def get_chat_history(self, session_id: str, limit: int = 50):
         """Get chat history for a session"""
         try:

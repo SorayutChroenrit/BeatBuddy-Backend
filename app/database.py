@@ -17,30 +17,28 @@ except:
     # Fallback to common paths if automatic detection fails
     ssl_cert = "/etc/ssl/cert.pem"  # Common path on macOS
 
-# connection parameters for TiDB
-connect_args = {
-    "ssl": {
-        "ssl_mode": "VERIFY_IDENTITY",
-        "ssl_ca": ssl_cert,
-    },
-    "connect_timeout": 120,  
-    "read_timeout": 120,     
-    "write_timeout": 120,    
-    "autocommit": True      
-}
-
 # Create engine with more robust TiDB connection settings
 engine = create_engine(
     settings.DATABASE_URL,
-    connect_args=connect_args,
-    pool_recycle=900,        
+    connect_args={
+        "ssl": {
+            "ssl_mode": "VERIFY_IDENTITY",
+            "ssl_ca": ssl_cert,
+        },
+        "connect_timeout": 120,  
+        "read_timeout": 120,     
+        "write_timeout": 120,    
+        "autocommit": False     
+    },
+    pool_recycle=300,           
     pool_pre_ping=True,
     echo_pool=True,          
-    pool_size=10,            
-    max_overflow=20,         
-    pool_timeout=60,        
+    pool_size=15,               
+    max_overflow=30,            
+    pool_timeout=30,           
     execution_options={"isolation_level": "READ COMMITTED"}  
 )
+
 
 # Create session with robust connection handling
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
