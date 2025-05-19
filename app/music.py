@@ -1488,7 +1488,7 @@ Answer ONLY "YES" or "NO" - no explanations."""
             logger.error(f"Error retrieving chat history: {e}")
             return []
     
-    def get_user_chat_history(self, user_id: str, limit: int = 10000):
+    def get_user_chat_history(self, user_id: str, limit: int = 50):
         """Get chat history for a user"""
         try:
             return self.db.query(ChatHistory).filter(
