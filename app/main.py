@@ -298,7 +298,13 @@ async def oauth_callback(
 async def signout():
     """Sign out user"""
     response = JSONResponse({"message": "Signed out"})
-    response.delete_cookie("session-token")
+    response.delete_cookie(
+        key="session-token",
+        httponly=True,
+        secure=True,
+        samesite="none",
+        path="/"  
+    )
     return response
 
 @app.get("/google{rest_of_path:path}")
