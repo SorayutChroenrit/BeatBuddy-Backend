@@ -1389,51 +1389,56 @@ Answer ONLY "YES" or "NO" - no explanations."""
         mode: str,
         intent: str = "general_query"
     ):
-        """Save chat to database with better connection handling"""
-        try:
-            # Create a new session for each save operation
-            chat = ChatHistory(
-                user_id=user_id,
-                session_id=session_id,
-                query=query,
-                response=response,
-                mode=mode,
-                intent=intent
-            )
-            self.db.add(chat)
-            
+        """Save chat to database with robust connection handling"""
+        max_retries = 3
+        retry_count = 0
+        backoff_factor = 0.5
+        
+        while retry_count < max_retries:
             try:
-                self.db.commit()
-                return chat
-            except Exception as db_error:
-                self.db.rollback()
+                # Create new chat history entry
+                chat = ChatHistory(
+                    user_id=user_id,
+                    session_id=session_id,
+                    query=query,
+                    response=response,
+                    mode=mode,
+                    intent=intent
+                )
                 
-                # If we get a connection closed error, try one more time with a new session
-                if "This Connection is closed" in str(db_error):
-                    logger.warning("Connection closed, creating new session and retrying")
-                    from sqlalchemy.orm import Session
-                    from app.database import engine
+                from app.database import get_db_context
+                
+                with get_db_context(max_retries=2) as db:
+                    db.add(chat)
+                    # Commit happens automatically in the context manager
+                    logger.info(f"Successfully saved chat history for session {session_id}")
+                    return chat
                     
-                    with Session(bind=engine) as new_session:
-                        new_chat = ChatHistory(
-                            user_id=user_id,
-                            session_id=session_id,
-                            query=query,
-                            response=response,
-                            mode=mode,
-                            intent=intent
-                        )
-                        new_session.add(new_chat)
-                        new_session.commit()
-                        return new_chat
+            except Exception as e:
+                retry_count += 1
+                error_msg = str(e)
+                
+                # Check for specific connection error patterns
+                is_connection_error = any(err in error_msg.lower() for err in 
+                                        ["connection closed", "broken pipe", "reset by peer", 
+                                        "not connected", "timeout", "connection refused"])
+                
+                if is_connection_error and retry_count < max_retries:
+                    # Calculate backoff time with exponential increase
+                    backoff_time = backoff_factor * (2 ** (retry_count - 1))
+                    logger.warning(f"Connection error in save_chat_history, retry {retry_count}/{max_retries} after {backoff_time}s: {error_msg}")
+                    time.sleep(backoff_time)
                 else:
-                    raise
-                    
-        except Exception as e:
-            logger.error(f"Database error in save_chat_history: {str(e)}")
-            print(f"Database error in save_chat_history: {e}")
-            # Don't re-raise to avoid breaking the chat flow
-            return None
+                    logger.error(f"Error saving chat history (attempt {retry_count}/{max_retries}): {error_msg}")
+                    if retry_count < max_retries:
+                        # Standard backoff for non-connection errors
+                        time.sleep(backoff_factor * retry_count)
+                    else:
+                        # If we've exhausted retries, log and continue
+                        logger.error(f"Failed to save chat history after {max_retries} attempts")
+                        break
+        
+        return None
     
     def get_chat_history(self, session_id: str, limit: int = 50):
         """Get chat history for a session"""
