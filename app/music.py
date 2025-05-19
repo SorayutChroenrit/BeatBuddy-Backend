@@ -1390,6 +1390,7 @@ Answer ONLY "YES" or "NO" - no explanations."""
         intent: str = "general_query"
     ):
         """Save chat to database with robust connection handling"""
+        from sqlalchemy import text
         max_retries = 3
         retry_count = 0
         backoff_factor = 0.5
@@ -1406,13 +1407,35 @@ Answer ONLY "YES" or "NO" - no explanations."""
                     intent=intent
                 )
                 
-                from app.database import get_db_context
-                
-                with get_db_context(max_retries=2) as db:
-                    db.add(chat)
-                    # Commit happens automatically in the context manager
+                # Try to add directly to the current session
+                try:
+                    # First check if the session is valid
+                    self.db.execute(text("SELECT 1"))
+                    self.db.add(chat)
+                    self.db.commit()
                     logger.info(f"Successfully saved chat history for session {session_id}")
                     return chat
+                except Exception as db_error:
+                    # If the current session fails, rollback and use a fresh session
+                    logger.warning(f"Error using existing session: {str(db_error)}")
+                    try:
+                        self.db.rollback()
+                    except:
+                        pass
+                    
+                    # Create a fresh session
+                    from sqlalchemy.orm import Session
+                    from app.database import engine
+                    
+                    with Session(bind=engine) as fresh_db:
+                        # Test the connection
+                        fresh_db.execute(text("SELECT 1"))
+                        
+                        # Add and commit
+                        fresh_db.add(chat)
+                        fresh_db.commit()
+                        logger.info(f"Successfully saved chat history using fresh session for {session_id}")
+                        return chat
                     
             except Exception as e:
                 retry_count += 1

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import OperationalError, DBAPIError, DisconnectionError
@@ -58,7 +58,7 @@ def get_db(max_retries=3):
         db = SessionLocal()
         try:
             # Test connection before returning
-            db.execute("SELECT 1")
+            db.execute(text("SELECT 1"))
             logger.debug("Database connection established successfully")
             yield db
             break
